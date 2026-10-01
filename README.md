@@ -1,6 +1,12 @@
 ## About this fork
 
-This fork of [tolwi/hassio-ecoflow-cloud](https://github.com/tolwi/hassio-ecoflow-cloud) adds per-battery sensors for the **EcoFlow DELTA Pro Ultra** (developer API connection). Everything else is identical to upstream, and the change has been submitted upstream as [pull request #927](https://github.com/tolwi/hassio-ecoflow-cloud/pull/927). The code is on the [`dpu-per-battery-sensors`](https://github.com/1RadMan/ecoflow-cloud-dpu-extra/tree/dpu-per-battery-sensors) branch.
+This fork of [tolwi/hassio-ecoflow-cloud](https://github.com/tolwi/hassio-ecoflow-cloud) adds per-battery sensors for the **EcoFlow DELTA Pro Ultra** (developer API connection). Everything else is identical to upstream. The change has been submitted upstream as [pull request #927](https://github.com/tolwi/hassio-ecoflow-cloud/pull/927); until it's merged there, install this fork to get the sensors. For general setup and the other supported devices, see the [upstream README](https://github.com/tolwi/hassio-ecoflow-cloud#readme).
+
+### Installing this fork
+
+1. In HACS, open the ⋮ menu → **Custom repositories**, add `https://github.com/1RadMan/ecoflow-cloud-dpu-extra` with type **Integration**.
+2. If you already have the upstream EcoFlow Cloud integration from HACS, remove it **in HACS** first (not under Settings → Integrations). Both use the same integration, so your EcoFlow configuration and existing entities carry over.
+3. Download **EcoFlowCloud** from this fork's repository and restart Home Assistant.
 
 ### Why
 
