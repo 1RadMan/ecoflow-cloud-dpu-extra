@@ -1,3 +1,43 @@
+## About this fork
+
+This fork of [tolwi/hassio-ecoflow-cloud](https://github.com/tolwi/hassio-ecoflow-cloud) adds per-battery sensors for the **EcoFlow DELTA Pro Ultra** (developer API connection). Everything else is identical to upstream, and the change has been submitted upstream as a pull request.
+
+### Why
+
+The DELTA Pro Ultra reports a full battery-management record for every battery in the stack, but the integration only exposed stack-level values (one charge level for the whole stack). That made it impossible to see how individual batteries behave, for example when a replacement or refurbished battery is mixed in with older ones.
+
+### What it adds
+
+One set of sensors per installed battery, on the existing DPU device:
+
+| Sensor | Unit | Default |
+|---|---|---|
+| Position (slot in the stack, 1–5) | – | On |
+| Level | % | On |
+| Input Power | W | On |
+| Output Power | W | On |
+| Current (negative while discharging) | mA | On |
+| Temperature | °C | On |
+| State of Health | % | On |
+| Cycles | – | On |
+| Cell Voltage Difference (highest minus lowest cell) | mV | On |
+| Min Cell Volts / Max Cell Volts | V | Off |
+| Full Capacity / Remaining Capacity | mAh | Off |
+
+Sensors are named by serial number, for example `DPU 1 Battery Y716XXXXXXXXXXXX Level`.
+
+### Batteries are tracked by serial number, not slot
+
+Each sensor is identified by its battery's serial number. On every update it looks up which slot currently reports that serial, so if you swap batteries between positions, each battery's history goes with it. The Position sensor shows where the battery sits now.
+
+### Notes
+
+- **Stale records are ignored.** EcoFlow's cloud can keep returning an old record for a slot that no longer holds a battery, sometimes repeating the serial of a battery that has moved. Only slots up to the installed battery count are read, and if a serial still appears twice, the newest record wins.
+- **Adding a battery:** a newly added battery gets its sensors after the integration is reloaded or Home Assistant restarts.
+- **Moving between inverters:** a battery moved to a different DPU starts a new set of sensors under that DPU.
+- **DELTA Pro Ultra X:** unaffected. It uses a separate part of the integration that already offers per-battery level and temperature by position. Its battery data doesn't include a serial number, so this approach doesn't apply there.
+
+
 # EcoFlow Cloud Integration for Home Assistant
 [![GitHub release](https://img.shields.io/github/release/tolwi/hassio-ecoflow-cloud?include_prereleases=&sort=semver&color=blue)](https://github.com/tolwi/hassio-ecoflow-cloud/releases/)
 [![issues - hassio-ecoflow-cloud](https://img.shields.io/github/issues/tolwi/hassio-ecoflow-cloud)](https://github.com/tolwi/hassio-ecoflow-cloud/issues)
