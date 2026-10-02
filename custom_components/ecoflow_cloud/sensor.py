@@ -47,6 +47,7 @@ from . import (
     ATTR_STATUS_SN,
     ATTR_STATUS_UPDATES,
     ECOFLOW_DOMAIN,
+    power_throttle,
 )
 from .api import EcoflowApiClient
 from .devices import BaseDevice, const
@@ -442,6 +443,12 @@ class WattsSensorEntity(BaseSensorEntity):
     _attr_default_value: Any = 0
     _attr_suggested_display_precision = 0
 
+    # Update throttling (see power_throttle.py). Class-level so a device file can
+    # tune it for one sensor type.
+    _throttle_min_delta_w: float = power_throttle.MIN_DELTA_W
+    _throttle_min_delta_pct: float = power_throttle.MIN_DELTA_PCT
+    _throttle_heartbeat: timedelta = power_throttle.HEARTBEAT
+
     def __init__(
         self,
         client,
@@ -463,6 +470,28 @@ class WattsSensorEntity(BaseSensorEntity):
         )
         self._energy_enabled = False
         self._energy_enabled_default = True
+        self._last_published_at: datetime | None = None
+
+    def _update_value(self, val: Any) -> bool:
+        try:
+            digits = self._attr_suggested_display_precision or 0
+            # Readings are only shown to this precision, so finer jitter is noise.
+            new = round(float(val), digits) if digits else round(float(val))
+        except (TypeError, ValueError):
+            return super()._update_value(val)
+        now = dt.utcnow()
+        if not power_throttle.should_publish_power(
+            self._attr_native_value,
+            new,
+            self._last_published_at,
+            now,
+            self._throttle_min_delta_w,
+            self._throttle_min_delta_pct,
+            self._throttle_heartbeat,
+        ):
+            return False
+        self._last_published_at = now
+        return super()._update_value(new)
 
     def with_energy(self, enabled_default: bool = True):
         self._energy_enabled = True

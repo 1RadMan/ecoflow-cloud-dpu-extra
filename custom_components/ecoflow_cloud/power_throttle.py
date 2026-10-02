@@ -1,0 +1,44 @@
+"""Decide when a new power reading is worth publishing to Home Assistant.
+
+EcoFlow devices push power readings every few seconds, and the values jitter by
+fractions of a watt. Publishing every change writes a recorder row on nearly
+every update: a single Smart Gateway circuit can produce more than 10,000 rows a
+day. A reading is only published straight away when it has moved meaningfully;
+smaller differences are still published at least once per heartbeat, so graphs,
+5-minute statistics and the integrated kWh sensors stay accurate.
+
+Kept free of Home Assistant imports so the rule can be tested on its own.
+"""
+
+from datetime import datetime, timedelta
+from typing import Any
+
+# Publish straight away when a reading moves by at least this many watts...
+MIN_DELTA_W = 5.0
+# ...or by this percentage of the last published value, whichever is larger.
+MIN_DELTA_PCT = 2.0
+# Any smaller difference is published once this much time has passed.
+HEARTBEAT = timedelta(seconds=60)
+
+
+def should_publish_power(
+    old: Any,
+    new: float,
+    last_published_at: datetime | None,
+    now: datetime,
+    min_delta_w: float = MIN_DELTA_W,
+    min_delta_pct: float = MIN_DELTA_PCT,
+    heartbeat: timedelta = HEARTBEAT,
+) -> bool:
+    """Return True when ``new`` should replace the last published value ``old``."""
+    if last_published_at is None or isinstance(old, bool) or not isinstance(old, (int, float)):
+        return True
+    if new == old:
+        return False
+    # Starting or stopping (to or from 0 W) is always shown immediately.
+    if (old == 0) != (new == 0):
+        return True
+    threshold = max(min_delta_w, abs(old) * min_delta_pct / 100)
+    if abs(new - old) >= threshold:
+        return True
+    return now - last_published_at >= heartbeat
