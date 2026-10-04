@@ -303,17 +303,42 @@ class StateOfHealthSensorEntity(BaseSensorEntity):
     _attr_state_class = SensorStateClass.MEASUREMENT
 
 
+def _throttle_allows(entity: Any, new: float) -> bool:
+    """Apply the power_throttle publish rule using the entity's _throttle_* attributes."""
+    now = dt.utcnow()
+    if not power_throttle.should_publish(
+        entity._attr_native_value,
+        new,
+        getattr(entity, "_last_published_at", None),
+        now,
+        entity._throttle_min_delta,
+        entity._throttle_min_delta_pct,
+        entity._throttle_heartbeat,
+    ):
+        return False
+    entity._last_published_at = now
+    return True
+
+
 class RemainSensorEntity(BaseSensorEntity):
     _attr_device_class = SensorDeviceClass.DURATION
     _attr_native_unit_of_measurement = UnitOfTime.MINUTES
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_default_value: Any = 0
 
+    # Update throttling (see power_throttle.py): remaining time is recalculated from
+    # the instantaneous load every few seconds and swings by a few minutes at a time.
+    _throttle_min_delta: float = power_throttle.REMAIN_MIN_DELTA_MIN
+    _throttle_min_delta_pct: float = power_throttle.REMAIN_MIN_DELTA_PCT
+    _throttle_heartbeat: timedelta = power_throttle.REMAIN_HEARTBEAT
+
     def _update_value(self, val: Any) -> Any:
         ival = int(val)
         if ival < 0 or ival > 5000:
             ival = 0
 
+        if not _throttle_allows(self, ival):
+            return False
         return super()._update_value(ival)
 
 
@@ -323,11 +348,18 @@ class SecondsRemainSensorEntity(BaseSensorEntity):
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_default_value: Any = 0
 
+    # Same rule as RemainSensorEntity, in seconds.
+    _throttle_min_delta: float = power_throttle.REMAIN_MIN_DELTA_MIN * 60
+    _throttle_min_delta_pct: float = power_throttle.REMAIN_MIN_DELTA_PCT
+    _throttle_heartbeat: timedelta = power_throttle.REMAIN_HEARTBEAT
+
     def _update_value(self, val: Any) -> Any:
         ival = int(val)
         if ival < 0 or ival > 5000:
             ival = 0
 
+        if not _throttle_allows(self, ival):
+            return False
         return super()._update_value(ival)
 
 
@@ -895,6 +927,29 @@ class IntegralEnergySensorEntity(IntegrationSensor):
         )
         self.device_info = base.device_info
         self._attr_entity_registry_enabled_default = enabled_default and base.enabled_default
+        self._last_written_at: datetime | None = None
+        self._last_written_available: bool | None = None
+
+    @callback
+    def async_write_ha_state(self) -> None:
+        """Write the state at most once a minute (see power_throttle.ENERGY_WRITE_INTERVAL).
+
+        HA's IntegrationSensor writes on every source power update, which for a busy
+        circuit is thousands of recorder rows a day. The running total lives in
+        self._state and keeps updating on every reading, and it is also what gets
+        restored after a restart, so skipping intermediate writes loses no energy.
+        The max_sub_interval timer keeps calling this, so the latest total is written
+        within about two minutes. Availability changes are always written at once.
+        """
+        now = dt.utcnow()
+        available = self.available
+        if available == self._last_written_available and not power_throttle.should_write(
+            self._last_written_at, now
+        ):
+            return
+        self._last_written_at = now
+        self._last_written_available = available
+        super().async_write_ha_state()
 
 
 class SolarPowerSensorEntity(WattsSensorEntity):
