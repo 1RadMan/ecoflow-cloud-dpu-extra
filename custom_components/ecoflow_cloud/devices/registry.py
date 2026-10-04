@@ -25,6 +25,7 @@ from custom_components.ecoflow_cloud.devices.internal import (
     river_max as internal_river_max,
     river_mini as internal_river_mini,
     river_pro as internal_river_pro,
+    smart_gateway as internal_smart_gateway,
     smart_home_panel_3 as internal_smart_home_panel_3,
     smart_meter as internal_smart_meter,
     smart_plug as internal_smart_plug,
@@ -72,6 +73,7 @@ devices: OrderedDict[str, Type[BaseDevice]] = OrderedDict[str, Type[BaseDevice]]
         "DELTA_PRO_3": internal_delta_pro_3.DeltaPro3,
         "DELTA_PRO_ULTRA_X": internal_delta_pro_ultra_x.DeltaProUltraX,
         "SMART_HOME_PANEL_3": internal_smart_home_panel_3.SmartHomePanel3,
+        "SMART_GATEWAY": internal_smart_gateway.SmartGateway,  # HR65 — 200A gateway, 6 circuits
         # Ocean Pro is two devices on two MQTT streams; the user selects the
         # matching type per serial number in the manual (app-API) flow.
         "OCEAN_SMART_PANEL": internal_ocean_pro.OceanPanel,      # HR61 — circuits

@@ -218,6 +218,11 @@ class SmartHomePanel3(DeltaPro3):
             InAmpSensorEntity(client, self, "shp_grid_l1_amp", "Grid L1 Current", False, diagnostic=True),
             InAmpSensorEntity(client, self, "shp_grid_l2_amp", "Grid L2 Current", False, diagnostic=True),
         ]
+        return out + self.circuit_sensors(client)
+
+    def circuit_sensors(self, client: EcoflowApiClient) -> list[SensorEntity]:
+        """Per-circuit power/voltage/current sensors for the first CIRCUITS circuits."""
+        out: list[SensorEntity] = []
         # Per-circuit sensors: power enabled with an integrated-energy
         # companion (kWh) for the Energy dashboard; volt/amp disabled by
         # default. Titles use the device-provided circuit label once it has

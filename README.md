@@ -1,12 +1,54 @@
 ## About this fork
 
-This fork of [tolwi/hassio-ecoflow-cloud](https://github.com/tolwi/hassio-ecoflow-cloud) adds per-battery sensors for the **EcoFlow DELTA Pro Ultra** (developer API connection). Everything else is identical to upstream. The change has been submitted upstream as [pull request #927](https://github.com/tolwi/hassio-ecoflow-cloud/pull/927); until it's merged there, install this fork to get the sensors. For general setup and the other supported devices, see the [upstream README](https://github.com/tolwi/hassio-ecoflow-cloud#readme).
+This fork of [tolwi/hassio-ecoflow-cloud](https://github.com/tolwi/hassio-ecoflow-cloud) adds:
+
+- **[EcoFlow Smart Gateway](#ecoflow-smart-gateway) support:** monitoring and control of the 200A Smart Gateway (HR65) and its paired DELTA Pro Ultras.
+- **[Per-battery sensors](#delta-pro-ultra-per-battery-sensors) for the EcoFlow DELTA Pro Ultra** (developer API connection). Submitted upstream as [pull request #927](https://github.com/tolwi/hassio-ecoflow-cloud/pull/927).
+- **[Fewer recorder writes](#fewer-recorder-writes)** from power, remaining-time and energy sensors, for every device.
+
+Everything else is identical to upstream. For general setup and the other supported devices, see the [upstream README](https://github.com/tolwi/hassio-ecoflow-cloud#readme).
 
 ### Installing this fork
 
 1. In HACS, open the ⋮ menu → **Custom repositories**, add `https://github.com/1RadMan/ecoflow-cloud-dpu-extra` with type **Integration**.
 2. If you already have the upstream EcoFlow Cloud integration from HACS, remove it **in HACS** first (not under Settings → Integrations). Both use the same integration, so your EcoFlow configuration and existing entities carry over.
 3. Download **EcoFlowCloud** from this fork's repository and restart Home Assistant.
+
+## EcoFlow Smart Gateway
+
+The integration had no profile for the Smart Gateway. It speaks the same protocol as the Smart Home Panel 3, so this adds it as a variant of that device with the gateway's own flows and controls.
+
+### Adding the gateway
+
+The gateway is only reachable through EcoFlow's app connection, not the developer API. In the integration, add an entry with your **EcoFlow account** (email and password), choose the device type **`SMART_GATEWAY`**, and enter the gateway's serial number (starts with `HR65`). Your DELTA Pro Ultras can stay on their existing (developer API) entry.
+
+### Sensors
+
+- Home load, grid (total and per leg: power, voltage, current), solar from all paired DPUs, DPU output, and battery charging / discharging, each with a kWh total for the Energy dashboard
+- Combined battery level, backup reserve, charge / discharge time remaining
+- Per smart circuit: power (with kWh), voltage and current, named after the circuit labels set in the EcoFlow app. 240V circuits appear once, with both legs combined. Pairing or splitting circuits in the app is picked up automatically.
+
+### Controls
+
+| Control | What it does |
+|---|---|
+| Operating Mode | Self-Powered or Backup. Other modes (such as TOU) show as unknown and can't be selected. |
+| Smart Circuit N | Turns the circuit on or off (both legs of a 240V circuit). |
+| Smart Circuit N Source | Auto (follows the operating mode) or Grid. |
+| Backup Reserve | 5–70% (70% is the app's maximum). In Backup mode, raising it above the battery level makes the DPUs charge from the grid up to it. |
+| Battery Charging Power per DPU | Grid-charging power limit, applied to each paired DPU, 1,000–12,000 W. |
+| DPU N Charge Now | Charges that DPU from the grid until it reaches its max-charge setting. **Experimental**, see below. |
+
+Each control checks that the gateway reported the change and sends it once more if it didn't. Changes made in the EcoFlow app get a logbook entry saying so.
+
+### Tested with, and limits
+
+- Built and tested on one Smart Gateway with two DELTA Pro Ultras (firmware as of October 2026). The message fields were decoded from that setup; other firmware may differ. Please open an issue with a diagnostics download if something looks wrong.
+- **Charge Now** is created for two DPU slots. Which slot is which DPU was only confirmed with two DPUs; with one or three DPUs it may control the wrong unit or nothing at all, and a third DPU's Charge Now isn't exposed.
+- The backup reserve's minimum and the charging power's minimum and step size are assumptions; the app's own limits win if they differ.
+- With the EcoFlow app closed the gateway only pushes updates every few minutes, so the integration requests a full snapshot every 30 seconds.
+
+## DELTA Pro Ultra per-battery sensors
 
 ### Why
 
@@ -53,3 +95,13 @@ Each sensor is tied to its battery's serial number. On every update it looks up 
 - **Adding a battery:** a newly added battery gets its sensors after the integration is reloaded or Home Assistant restarts.
 - **Moving between inverters:** a battery moved to a different DPU starts a new set of sensors under that DPU.
 - **DELTA Pro Ultra X:** unaffected. It uses a separate part of the integration that already offers per-battery level and temperature by position. Its battery data doesn't include a serial number, so this approach doesn't apply there.
+
+## Fewer recorder writes
+
+EcoFlow devices push readings every few seconds and the values jitter, so nearly every update became a new state and a recorder row (a single Smart Gateway circuit wrote more than 10,000 rows a day). This fork, for every device:
+
+- **Power sensors** publish straight away when a reading moves by at least 5 W or 2% (whichever is larger) or starts / stops, and otherwise at least once a minute.
+- **Remaining-time sensors** publish when they move by at least 5 minutes or 5%, and otherwise at least every 5 minutes.
+- **kWh totals** still integrate every reading, but write their state at most once a minute.
+
+Graphs, 5-minute statistics and energy totals stay accurate (within a few Wh a day in testing).

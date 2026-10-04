@@ -38,6 +38,8 @@ class ReconnectButtonEntity(ButtonEntity, EcoFlowAbstractEntity):
     def __init__(self, client: EcoflowApiClient, device):
         super().__init__(client, device, "Reconnect", "reconnect")
         self._attr_device_class = ButtonDeviceClass.RESTART
+        # A device may move this out of its Controls section (default: stays there).
+        self._attr_entity_category = getattr(device, "RECONNECT_ENTITY_CATEGORY", None)
 
     async def async_press(self) -> None:
         await self.hass.async_add_executor_job(self._client.stop)
