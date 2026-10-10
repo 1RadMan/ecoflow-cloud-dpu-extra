@@ -99,8 +99,25 @@ whose sub-field 4 is 1 while Charge Now is on and 2 while off (sub-field 3 is
 in sub-field 3). Captured from the app turning it on and off for both DPUs of a
 two-DPU gateway: slot 0 = 1010/536/1225, slot 1 = 1011/537/1226; the AC input
 of the matching DPU (1010+i sub-field 8) rose to ~1.9 kW within seconds, and
-1225+i followed within ~10 s. A third slot isn't known (1227 is a float), so
-only two are exposed.
+1225+i followed within ~10 s. The two slots are Smart Inlet Box ports AC2 and
+AC3 (see below), whose port blocks these are; AC1's Charge Now (535/1224, an EV
+charger's here) isn't exposed.
+
+Smart Inlet Box ports (AC1..AC3, i = 0..2), where the DPUs and an EV charger
+connect: field 1224 + i reports each port, sub-field 1 = its power setting (1
+on, 2 off), 2 = what's attached (1 DPU, 3 EV charger), 3 = its bus address
+(1, 6, 7), 4 = Charge Now (above), 6 = 2 while the port is on / 1 while off.
+The app switches a port with a ConfigWrite carrying field 535 + i = {1: 1} on /
+{1: 2, 2: 2} off (switching off also clears Charge Now); Charge Now writes the
+same block, which is why both are read together for the logbook. Switching a
+port off only stops the gateway drawing AC from what's attached: a DPU stays on
+and keeps charging from solar. Captured from the app switching AC2, AC3 and AC1
+(DPU, DPU, EV charger) off and on; 1224 + i followed each write within 1-3 s.
+The attached device's serial is sub-field 3 of field 1009 + i for a DPU (seen
+for AC2/AC3 as 1010/1011; 1009 arrives empty while AC1 has the EV charger) and
+of field 1255 + i for an EV charger (rating, 9600 W, in sub-field 5). A port's
+switch is named after the attached device: its name in HA when the serial
+matches an EcoFlow device there, else its type.
 
 Battery charging power ("System device settings > Battery charging" in the
 app): the grid-charging power limit, in W, applied to each paired DPU. Reported
@@ -121,7 +138,7 @@ import asyncio
 import json
 import logging
 from functools import partial
-from typing import Any, ClassVar, override
+from typing import Any, ClassVar, Self, override
 
 from google.protobuf.json_format import MessageToDict
 from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberMode
@@ -129,9 +146,12 @@ from homeassistant.components.select import SelectEntity
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.const import PERCENTAGE, UnitOfPower
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import EntityCategory
+from homeassistant.helpers.storage import Store
 
 from custom_components.ecoflow_cloud.api import EcoflowApiClient
 from custom_components.ecoflow_cloud.api.message import Message, PrivateAPIMessageProtocol
@@ -220,6 +240,19 @@ CHARGE_NOW_CONFIRM_SEC = 15.0  # the gateway takes up to ~10 s to report it
 CFG_CHARGE_POWER = 542
 F_CHARGE_POWER = 1244
 CHARGE_POWER_MIN, CHARGE_POWER_MAX, CHARGE_POWER_STEP = 1000, 12000, 100
+
+# Smart Inlet Box ports AC1..AC3 (i = 0..2): ConfigWrite field, the port block
+# in 254/21, and the blocks carrying the attached DPU's / EV charger's serial.
+INLET_PORTS = 3
+CFG_INLET_BASE = 535
+F_INLET_BASE = 1224
+F_INLET_DPU_BASE = 1009
+F_INLET_ACC_BASE = 1255
+INLET_ON, INLET_OFF = 1, 2
+INLET_TYPE_DPU, INLET_TYPE_EV_CHARGER = 1, 3
+INLET_DEVICE_TYPES: dict[int, str] = {INLET_TYPE_DPU: "DPU", INLET_TYPE_EV_CHARGER: "EV Charger"}
+# Port i's Charge Now slot (AC2 = slot 0): the slots write the ports' blocks.
+INLET_CHARGE_NOW_OFFSET = CFG_CHARGE_NOW_BASE - CFG_INLET_BASE
 
 # Circuit settings: ConfigWrite field CFG_CIRCUIT_BASE + n for circuit n.
 CFG_CIRCUIT_BASE = 386
@@ -487,6 +520,61 @@ def _charge_now_switch_command(device_sn: str, slot: int):
     return lambda value: _charge_now_command(device_sn, slot, bool(value))
 
 
+def _inlet_command(device_sn: str, port: int, on: bool) -> _ConfigWrite:
+    """Field 535 + i for port ACn (i = n - 1): {1: 1} to switch it on, {1: 2, 2: 2}
+    to switch it off (as the app does: off also clears the port's Charge Now)."""
+    body = _varint(1 << 3 | WIRE_VARINT) + _varint(INLET_ON if on else INLET_OFF)
+    if not on:
+        body += _varint(2 << 3 | WIRE_VARINT) + _varint(2)
+    return _ConfigWrite(device_sn, _len_field(CFG_INLET_BASE + port - 1, body))
+
+
+def _inlet_switch_command(device_sn: str, port: int):
+    return lambda value: _inlet_command(device_sn, port, bool(value))
+
+
+class InletPortSwitchEntity(_ConfirmedCommand, EnabledEntity):
+    """A Smart Inlet Box port (AC1..AC3): whether the gateway can draw AC from
+    the device attached to it (a DPU stays on and keeps charging from solar).
+
+    Named "Smart Inlet Box ACn (device)" after the attached device, so the three
+    sort together after the circuits; the entity ID comes from "Inlet ACn"
+    instead (e.g. switch.smart_gateway_inlet_ac1, or with the device's area
+    prefixed), so it doesn't depend on the attached device.
+    """
+
+    _ICONS: ClassVar[dict[int, str]] = {INLET_TYPE_DPU: "mdi:home-battery", INLET_TYPE_EV_CHARGER: "mdi:ev-station"}
+
+    def for_port(self, n: int) -> Self:
+        self._port = n
+        return self
+
+    @property
+    def name(self) -> str:
+        label = self._device.inlet_device_label(self._port, getattr(self, "hass", None))  # type: ignore[attr-defined]
+        base = f"Smart Inlet Box AC{self._port}"
+        return f"{base} ({label})" if label else base
+
+    def title(self) -> str:
+        return self.name
+
+    @property
+    def icon(self) -> str:
+        return self._ICONS.get(self._device.inlet_device_type(self._port), "mdi:power-plug")  # type: ignore[attr-defined]
+
+    @property
+    def suggested_object_id(self) -> str:
+        return f"Inlet AC{self._port}"
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self.hass.async_add_executor_job(partial(self.turn_on, **kwargs))
+        self._confirm_later(1)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self.hass.async_add_executor_job(partial(self.turn_off, **kwargs))
+        self._confirm_later(0)
+
+
 def _circuit_command(
     device_sn: str, params: dict[str, Any], n: int, *, on: bool | None = None, source: int | None = None
 ) -> _ConfigWrite:
@@ -596,15 +684,77 @@ class SmartGateway(SmartHomePanel3):
         # Second legs of 240V pairs when the circuit entities were built.
         self._built_secondary: frozenset[int] | None = None
         self._topology_check_pending = False
+        # What's attached to each Smart Inlet Box port, by port number:
+        # {"type": INLET_TYPE_*, "dpu_sn": ..., "acc_sn": ...}; persisted, so
+        # the port switches are named correctly right after a restart.
+        self._inlet: dict[int, dict[str, Any]] = {}
 
     def reported(self, key: str) -> Any:
         return self._reported.get(key)
 
     @override
+    def configure(self, hass: HomeAssistant) -> None:
+        super().configure(hass)
+        self._inlet_store: Store[dict] = Store(hass, 1, f"ecoflow_cloud.{self.device_info.sn}.inlet_ports")
+
+    @override
     async def async_restore_state(self) -> None:
-        """Restore labels/pairing (parent), then drop entities of second legs."""
+        """Restore labels/pairing (parent), then drop entities of second legs;
+        and restore what's attached to each inlet port."""
         await super().async_restore_state()
         self._remove_secondary_leg_entities()
+        store = getattr(self, "_inlet_store", None)
+        data = await store.async_load() if store is not None else None
+        if isinstance(data, dict):
+            for n, port in data.items():
+                if str(n).isdigit() and isinstance(port, dict):
+                    self._inlet[int(n)] = dict(port)
+
+    def _save_inlet(self) -> None:
+        """Persist the inlet ports (called from decoding, on the MQTT thread)."""
+        store, hass = getattr(self, "_inlet_store", None), getattr(self, "_hass", None)
+        if store is None or hass is None:
+            return
+        snapshot = {str(n): dict(p) for n, p in self._inlet.items()}
+        asyncio.run_coroutine_threadsafe(store.async_save(snapshot), hass.loop)
+
+    def inlet_device_type(self, n: int) -> int | None:
+        return self._inlet.get(n, {}).get("type")
+
+    def inlet_device_label(self, n: int, hass: HomeAssistant | None) -> str | None:
+        """What's attached to port ACn: the name of the EcoFlow device in HA with
+        its serial, else its type ("DPU", "EV Charger"), else None."""
+        port = self._inlet.get(n, {})
+        sn = port.get("dpu_sn") or port.get("acc_sn")
+        if sn and hass is not None:
+            try:
+                name = self._registry_device_name(hass, sn)
+            except Exception as e:  # naming is cosmetic; never break the entity over it
+                _LOGGER.debug("Smart Gateway: device lookup for %s failed: %s", sn, e)
+                name = None
+            if name:
+                return name
+        return INLET_DEVICE_TYPES.get(port.get("type"))  # type: ignore[arg-type]
+
+    @staticmethod
+    def _registry_device_name(hass: HomeAssistant, sn: str) -> str | None:
+        """Name of this integration's device with serial `sn` (developer-API or
+        app entry), from any config entry. async_get_devices where available:
+        async_get_device is deprecated (HA 2027.8), and the replacement
+        async_get_device_by_identifier needs the device's config entry."""
+        from custom_components.ecoflow_cloud import ECOFLOW_DOMAIN
+
+        registry = dr.async_get(hass)
+        get_devices = getattr(registry, "async_get_devices", None)
+        for identifier in (f"api-{sn}", sn):
+            ids = {(ECOFLOW_DOMAIN, identifier)}
+            if get_devices is not None:
+                devices = list(get_devices(identifiers=ids))
+            else:
+                devices = [d for d in (registry.async_get_device(identifiers=ids),) if d is not None]
+            if devices:
+                return devices[0].name_by_user or devices[0].name
+        return None
 
     def _secondary_legs(self) -> frozenset[int]:
         """Circuits that are the second (higher-numbered) leg of a 240V pair.
@@ -776,17 +926,30 @@ class SmartGateway(SmartHomePanel3):
     @override
     def switches(self, client: EcoflowApiClient) -> list[SwitchEntity]:
         sn = self.device_info.sn
-        return [
-            CircuitSwitchEntity(
-                client, self, f"ch_{n}_on", f"Smart Circuit {n}", _circuit_switch_command(sn, n)
-            ).for_circuit(n, "")
-            for n in self._primary_circuits()
-        ] + [
-            ChargeNowSwitchEntity(
-                client, self, f"gw_dpu_{i + 1}_charge_now", f"DPU {i + 1} Charge Now", _charge_now_switch_command(sn, i)
-            )
-            for i in range(CHARGE_NOW_SLOTS)
-        ]
+        return (
+            [
+                CircuitSwitchEntity(
+                    client, self, f"ch_{n}_on", f"Smart Circuit {n}", _circuit_switch_command(sn, n)
+                ).for_circuit(n, "")
+                for n in self._primary_circuits()
+            ]
+            + [
+                ChargeNowSwitchEntity(
+                    client,
+                    self,
+                    f"gw_dpu_{i + 1}_charge_now",
+                    f"DPU {i + 1} Charge Now",
+                    _charge_now_switch_command(sn, i),
+                )
+                for i in range(CHARGE_NOW_SLOTS)
+            ]
+            + [
+                InletPortSwitchEntity(
+                    client, self, f"inlet_ac{n}_on", f"Smart Inlet Box AC{n}", _inlet_switch_command(sn, n)
+                ).for_port(n)
+                for n in range(1, INLET_PORTS + 1)
+            ]
+        )
 
     def _primary_circuits(self) -> list[int]:
         """Circuits that get entities: all but the second leg of each 240V pair."""
@@ -881,6 +1044,8 @@ class SmartGateway(SmartHomePanel3):
                 key = f"gw_dpu_{i + 1}_charge_now"
                 result[key] = self._reported[key] = 1 if state == 1 else 0
 
+        self._decode_inlet(fields, result)
+
         # Operating mode: bitmask of the strategy flags set (0 = Backup).
         strategy = _first(fields, F_OPERATE_MODE, WIRE_LEN)
         if strategy is not None:
@@ -910,6 +1075,36 @@ class SmartGateway(SmartHomePanel3):
         if "gw_home_pwr" in self._flows and ("gw_home_pwr" in result or "shp_grid_pwr" in result):
             grid = self._flows.get("shp_grid_pwr", 0.0)
             result["gw_storage_pwr"] = round(max(self._flows["gw_home_pwr"] - grid, 0.0), 2)
+
+    def _decode_inlet(self, fields: FieldMap, result: dict[str, Any]) -> None:
+        """Smart Inlet Box ports: on/off, and what's attached (type, serial).
+
+        Each block arrives whole when present, so a serial missing from a
+        present block means there is none (e.g. 1009 while AC1 has an EV charger).
+        """
+        before = {n: dict(p) for n, p in self._inlet.items()}
+        for i in range(INLET_PORTS):
+            n = i + 1
+            block = _first(fields, F_INLET_BASE + i, WIRE_LEN)
+            if block is not None:
+                values = _parse_fields(block)
+                power = _first(values, 1, WIRE_VARINT)
+                if power in (INLET_ON, INLET_OFF):
+                    key = f"inlet_ac{n}_on"
+                    result[key] = self._reported[key] = 1 if power == INLET_ON else 0
+                kind = _first(values, 2, WIRE_VARINT)
+                if kind is not None:
+                    self._inlet.setdefault(n, {})["type"] = kind
+                    result[f"inlet_ac{n}_type"] = kind
+            for slot, base in (("dpu_sn", F_INLET_DPU_BASE), ("acc_sn", F_INLET_ACC_BASE)):
+                device = _first(fields, base + i, WIRE_LEN)
+                if device is None:
+                    continue
+                raw = _first(_parse_fields(device), 3, WIRE_LEN)
+                sn = raw.decode("utf-8", "ignore").strip("\x00 ") if raw else ""
+                self._inlet.setdefault(n, {})[slot] = sn if sn.isprintable() and sn else None
+        if self._inlet != before:
+            self._save_inlet()
 
     @override
     def get_quota_message(self) -> Message:
@@ -1020,11 +1215,10 @@ class SmartGateway(SmartHomePanel3):
             watts = _first(fields, CFG_CHARGE_POWER, WIRE_VARINT)
             if watts is not None:
                 changes.append(("gw_chg_pwr_limit", f"set to {watts} W", origin))
-            for i in range(CHARGE_NOW_SLOTS):
-                block = _first(fields, CFG_CHARGE_NOW_BASE + i, WIRE_LEN)
+            for i in range(INLET_PORTS):
+                block = _first(fields, CFG_INLET_BASE + i, WIRE_LEN)
                 if block is not None:
-                    on = _first(_parse_fields(block), 2, WIRE_VARINT) == 1
-                    changes.append((f"gw_dpu_{i + 1}_charge_now", f"turned {'on' if on else 'off'}", origin))
+                    changes += [(k, d, origin) for k, d in self._inlet_command_changes(i, _parse_fields(block))]
             secondary = self._secondary_legs()
             for n in range(1, self.CIRCUITS + 1):
                 setting = _first(fields, CFG_CIRCUIT_BASE + n, WIRE_LEN)
@@ -1046,6 +1240,42 @@ class SmartGateway(SmartHomePanel3):
                     detail = f"{'on' if on else 'off'}, {source_name}" if source_name else ("on" if on else "off")
                     changes.append((f"ch_{n}_on", f"set to {detail}", origin))
         return changes
+
+    def _inlet_command_changes(self, i: int, values: FieldMap) -> list[tuple[str, str]]:
+        """(key, description) for an app command to inlet port i's block.
+
+        The block carries the port's power (sub-field 1) and its Charge Now
+        (sub-field 2): {1: 1} / {1: 2, 2: 2} switch the port on / off, {1: 1,
+        2: 1} / {2: 2} turn Charge Now on / off. Each control gets a line when
+        the command changes it from the reported state (a port switched off
+        only mentions Charge Now if it cancels an active one); a command that
+        changes nothing (a repeat, or the new state already arrived) gets one
+        line on the control it was for.
+        """
+        power = _first(values, 1, WIRE_VARINT)
+        charge = _first(values, 2, WIRE_VARINT)
+        charge_command = charge == 1 or power is None
+        slot = i - INLET_CHARGE_NOW_OFFSET
+        port_key = f"inlet_ac{i + 1}_on"
+        charge_key = f"gw_dpu_{slot + 1}_charge_now" if 0 <= slot < CHARGE_NOW_SLOTS else None
+        lines: list[tuple[str, str]] = []
+        for key, value in ((port_key, power), (charge_key, charge)):
+            if key is None or value not in (1, 2):
+                continue
+            was = self.reported(key)
+            if key == charge_key and not charge_command:
+                changed = was == 1 and value == 2
+            else:
+                changed = was is None or bool(was) != (value == 1)
+            if changed:
+                lines.append((key, f"turned {'on' if value == 1 else 'off'}"))
+        if not lines:
+            if charge_command:
+                if charge_key is not None and charge in (1, 2):
+                    lines.append((charge_key, f"set to {'on' if charge == 1 else 'off'}"))
+            elif power in (1, 2):
+                lines.append((port_key, f"set to {'on' if power == 1 else 'off'}"))
+        return lines
 
     def _log_app_changes(self, changes: list[tuple[str, str, str]]) -> None:
         """Event loop: one logbook line per change, on the control it concerns."""
