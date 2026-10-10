@@ -37,16 +37,18 @@ The gateway is only reachable through EcoFlow's app connection, not the develope
 | Smart Circuit N Source | Auto (follows the operating mode) or Grid. |
 | Backup Reserve | 5–70% (70% is the app's maximum). In Backup mode, raising it above the battery level makes the DPUs charge from the grid up to it. |
 | Battery Charging Power per DPU | Grid-charging power limit, applied to each paired DPU, 1,000–12,000 W. |
-| DPU N Charge Now | Charges that DPU from the grid until it reaches its max-charge setting. **Experimental**, see below. |
-| Smart Inlet Box AC1–AC3 | Turns a Smart Inlet Box port on or off, named after what's attached, e.g. "Smart Inlet Box AC2 (DPU 1)". Off stops the gateway drawing power from that DPU or EV charger; a DPU stays on and keeps charging from solar. Switching a port off also cancels its Charge Now, as in the app. |
+| Smart Inlet Box AC1–AC3 | Turns a Smart Inlet Box port on or off, named after what's attached, e.g. "Smart Inlet Box AC2 (DPU 1)". Off stops the gateway drawing power from that DPU or EV charger; a DPU stays on and keeps charging from solar. Switching a port off also cancels its Charge Now, as in the app. Follows the inlet box's own port buttons too. |
+| Smart Inlet Box AC1–AC3 Charge Now | Charges the DPU on that port from the grid until it reaches its max-charge setting (switching the port on if it was off). On a port with an EV charger, this is the app's Charge now for the car. |
+
+The inlet box controls are unavailable while nothing is attached to their port. Before this version, Charge Now was named "DPU 1 / DPU 2 Charge Now" (ports AC2 / AC3); those two keep their entity IDs, so existing automations carry on working.
 
 Each control checks that the gateway reported the change and sends it once more if it didn't. Changes made in the EcoFlow app get a logbook entry saying so.
 
 ### Tested with, and limits
 
 - Built and tested on one Smart Gateway with two DELTA Pro Ultras (firmware as of October 2026). The message fields were decoded from that setup; other firmware may differ. Please open an issue with a diagnostics download if something looks wrong.
-- **Charge Now** is created for two DPU slots, which are Smart Inlet Box ports AC2 and AC3 (DPU 1 = AC2). Confirmed only with two DPUs on those ports; a DPU on AC1 has no Charge Now control.
-- **Inlet port names** use the attached device's name in Home Assistant when it's also set up in this integration (matched by serial number), otherwise its type ("DPU", "EV Charger"). Tested with two DPUs on AC2/AC3 and an EV charger on AC1.
+- **Inlet box controls** were tested with DELTA Pro Ultras on all three ports and an EV charger on AC1. Port on/off and Charge Now use the same commands on every port, whatever is attached. Charge Now with an EV charger and the DELTA Pro Ultra X are untested.
+- **Inlet port names** use the attached device's name in Home Assistant when it's also set up in this integration (matched by serial number), otherwise its type ("DPU", "EV Charger"). A device type the integration doesn't recognize (possibly the DELTA Pro Ultra X) shows only the port, e.g. "Smart Inlet Box AC1"; a diagnostics download shows its type code (`inlet_acN_type`), so please open an issue with one.
 - The backup reserve's minimum and the charging power's minimum and step size are assumptions; the app's own limits win if they differ.
 - With the EcoFlow app closed the gateway only pushes updates every few minutes, so the integration requests a full snapshot every 30 seconds.
 
