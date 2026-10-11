@@ -924,7 +924,7 @@ class Delta3(BaseInternalDevice):
         """Convert protobuf object to dict manually (fallback)."""
         result: dict[str, Any] = {}
         for field, value in protobuf_obj.ListFields():
-            if field.label == field.LABEL_REPEATED:
+            if field.is_repeated:
                 result[field.name] = list(value)
             elif hasattr(value, "ListFields"):  # nested message
                 result[field.name] = self._manual_protobuf_to_dict(value)
