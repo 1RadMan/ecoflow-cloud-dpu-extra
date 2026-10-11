@@ -523,14 +523,16 @@ def _inlet_switch_command(device_sn: str, port: int):
 
 class _InletPortControl(_ConfirmedCommand):
     """A Smart Inlet Box port control, named after the attached device:
-    "Smart Inlet Box ACn (device)" plus SUFFIX, so a port's controls sort
-    together after the circuits. The entity ID comes from "Inlet ACn" plus
-    SUFFIX instead (e.g. switch.smart_gateway_inlet_ac1, or with the device's
-    area prefixed), so it doesn't depend on the device. Unavailable while
-    nothing is attached to the port.
+    "S.I.B. ACn (device)" plus SUFFIX (S.I.B. = Smart Inlet Box; kept short so
+    the names fit on the device page), so a port's controls sort together. The
+    entity ID comes from "Inlet ACn" plus ID_SUFFIX instead (e.g.
+    switch.smart_gateway_inlet_ac1_charge_now, or with the device's area
+    prefixed), so it doesn't depend on the device. Unavailable while nothing
+    is attached to the port.
     """
 
     SUFFIX = ""
+    ID_SUFFIX = ""
     _ICONS: ClassVar[dict[int, str]] = {}
     _DEFAULT_ICON = "mdi:power-plug"
 
@@ -541,7 +543,7 @@ class _InletPortControl(_ConfirmedCommand):
     @property
     def name(self) -> str:
         label = self._device.inlet_device_label(self._port, getattr(self, "hass", None))  # type: ignore[attr-defined]
-        name = f"Smart Inlet Box AC{self._port}" + (f" ({label})" if label else "")
+        name = f"S.I.B. AC{self._port}" + (f" ({label})" if label else "")
         return f"{name} {self.SUFFIX}" if self.SUFFIX else name
 
     def title(self) -> str:
@@ -553,7 +555,7 @@ class _InletPortControl(_ConfirmedCommand):
 
     @property
     def suggested_object_id(self) -> str:
-        return f"Inlet AC{self._port} {self.SUFFIX}".strip()
+        return f"Inlet AC{self._port} {self.ID_SUFFIX}".strip()
 
     @property
     def available(self) -> bool:
@@ -579,7 +581,8 @@ class ChargeNowSwitchEntity(_InletPortControl, EnabledEntity):
     """A port's Charge Now: grid-charges the DPU attached to it up to its own
     max-charge setting (for an EV charger, the app's Charge now for the car)."""
 
-    SUFFIX = "Charge Now"
+    SUFFIX = "Chg Now"
+    ID_SUFFIX = "Charge Now"
     _ICONS: ClassVar[dict[int, str]] = {INLET_TYPE_EV_CHARGER: "mdi:car-electric"}
     _DEFAULT_ICON = "mdi:battery-charging-high"
     _confirm_timeout = CHARGE_NOW_CONFIRM_SEC
@@ -948,7 +951,7 @@ class SmartGateway(SmartHomePanel3):
             ]
             + [
                 InletPortSwitchEntity(
-                    client, self, f"inlet_ac{n}_on", f"Smart Inlet Box AC{n}", _inlet_switch_command(sn, n)
+                    client, self, f"inlet_ac{n}_on", f"S.I.B. AC{n}", _inlet_switch_command(sn, n)
                 ).for_port(n)
                 for n in range(1, INLET_PORTS + 1)
             ]
@@ -957,7 +960,7 @@ class SmartGateway(SmartHomePanel3):
                     client,
                     self,
                     _charge_now_key(n),
-                    f"Smart Inlet Box AC{n} Charge Now",
+                    f"S.I.B. AC{n} Chg Now",
                     _charge_now_switch_command(sn, n),
                 ).for_port(n)
                 for n in range(1, INLET_PORTS + 1)
