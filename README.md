@@ -4,6 +4,7 @@ This fork of [tolwi/hassio-ecoflow-cloud](https://github.com/tolwi/hassio-ecoflo
 
 - **[EcoFlow Smart Gateway](#ecoflow-smart-gateway) support:** monitoring and control of the 200A Smart Gateway (HR65) and its paired DELTA Pro Ultras.
 - **[Per-battery sensors](#delta-pro-ultra-per-battery-sensors) for the EcoFlow DELTA Pro Ultra** (developer API connection). Submitted upstream as [pull request #927](https://github.com/tolwi/hassio-ecoflow-cloud/pull/927).
+- **[River 3 and River 3 Plus](#river-3-and-river-3-plus) fixes:** battery level, settings and switches now fill in, and a River 3 Plus is recognized automatically, with its own charging range and LED control.
 - **[Fewer recorder writes](#fewer-recorder-writes)** from power, remaining-time and energy sensors, for every device.
 
 Everything else is identical to upstream. For general setup and the other supported devices, see the [upstream README](https://github.com/tolwi/hassio-ecoflow-cloud#readme).
@@ -99,6 +100,41 @@ Each sensor is tied to its battery's serial number. On every update it looks up 
 - **Adding a battery:** a newly added battery gets its sensors after the integration is reloaded or Home Assistant restarts.
 - **Moving between inverters:** a battery moved to a different DPU starts a new set of sensors under that DPU.
 - **DELTA Pro Ultra X:** unaffected. It uses a separate part of the integration that already offers per-battery level and temperature by position. Its battery data doesn't include a serial number, so this approach doesn't apply there.
+
+## River 3 and River 3 Plus
+
+### What was wrong
+
+A River 3 only ever showed its power readings: battery level, charge limits and every switch and select stayed unknown. The River 3 ignores the request the integration used for a full status update, so only values that changed after startup ever arrived. This fork sends the request the River 3 does answer, so everything fills in within a minute or two of a restart. It also:
+
+- fixes **DC (12V) Enabled**, which never showed a state
+- stops the "can't decode" error lines logged each time the EcoFlow app opens the device page
+
+### Adding a River 3 or River 3 Plus
+
+The integration supports the River 3 only through the EcoFlow app connection (the developer API refuses a River 3 Plus). In the integration, add the device to an entry with your **EcoFlow account** (email and password), choose the device type **`RIVER_3`** for either model (there is no separate Plus type), and enter the serial number from the EcoFlow app.
+
+### River 3 Plus
+
+A River 3 Plus is recognized by its serial number (starting `R631`, `R634` or `R635`) and gets these differences:
+
+| | River 3 (as upstream) | River 3 Plus |
+|---|---|---|
+| AC Charging Power | 50–305 W | 50 W up to the maximum the unit reports (650 W on a US unit) |
+| LED Mode | – | Off, Dim, Bright or SOS |
+| Beeper | Yes | No (the EcoFlow app has no beeper setting for the Plus) |
+| AC In Volts, PCS AC / DC Temperature | Yes | No (see below) |
+| State of Health | Yes | Yes, read from the field the Plus reports in its regular updates |
+
+The Plus only sends AC input voltage and the PCS temperatures when the EcoFlow app asks for a full snapshot, and those values don't change between snapshots (identical readings about 45 minutes apart while the live readings moved on). As sensors they would show old values as if current, so the Plus doesn't get them.
+
+The AC charging slider moves in 50 W steps, the River 3 default. For finer control, set a smaller **power step** in the device's options (Configure on the integration entry).
+
+### Tested with, and limits
+
+- Tested on one River 3 Plus (US model, no extra battery, firmware as of October 2026). The status fix should apply to every River 3 model (it uses the same request as the DELTA 3), but hasn't been tested on a base River 3. On a base River 3, AC In Volts, the PCS temperatures and State of Health may have the same stale-data problem as on the Plus; please open an issue with a diagnostics download if you can check.
+- Extra batteries (EB300 / EB600) aren't shown separately.
+- Settings changed in the EcoFlow app show up in Home Assistant within seconds.
 
 ## Fewer recorder writes
 

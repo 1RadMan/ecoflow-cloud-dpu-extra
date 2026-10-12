@@ -111,6 +111,30 @@ def _create_river3_proto_command(field_name: str, value: int, device_sn: str, da
     return River3CommandMessage(payload, packet)
 
 
+def _create_river3_get_quota_command() -> River3CommandMessage:
+    """Build a protobuf 'get all' request that fetches the full device snapshot.
+
+    River 3 firmware is protobuf-only and silently ignores the JSON
+    ``latestQuotas`` request that ``BaseInternalDevice`` sends. Without a
+    snapshot, HA only sees the sparse change-only uploads, so config state
+    (AC/DC enable, X-Boost, beeper, charge limits, timeouts) and the
+    ``bms_*``/``cms_*`` display fields never arrive. Same wire format as the
+    Delta 3 request: a single empty header with src/dest/seq/from set; the
+    device answers on ``get_reply`` with a multi-header snapshot.
+    """
+    packet = ef_river3_pb2.River3SendHeaderMsg()
+    header = packet.msg.add()
+    header.src = 32
+    header.dest = 32
+    header.seq = Message.gen_seq()
+    # ``from`` is a Python reserved word (River3Header field 23).
+    setattr(header, "from", "HomeAssistant")
+
+    # Placeholder payload for River3CommandMessage.to_dict() diagnostics;
+    # the wire payload is the serialized packet, which carries no pdata.
+    return River3CommandMessage(ef_river3_pb2.River3SetCommand(), packet)
+
+
 def _create_river3_energy_backup_command(energy_backup_en: int | None, energy_backup_start_soc: int, device_sn: str):
     """Create a protobuf command for River 3 energy backup settings."""
     # Build the command using the generated protobuf classes
@@ -186,6 +210,31 @@ class OutWattsAbsSensorEntity(OutWattsSensorEntity):
         return super()._update_value(abs(int(val)))
 
 
+# RIVER 3 Plus family serial-number prefixes (Plus, Plus Wireless, Plus 270),
+# the same prefixes the EcoFlow app uses to tell the Plus from the base River 3
+# (R651/R653/R654/R655). The Plus shares the River 3 protocol but differs in a
+# few fields, so River3 adapts its entity set when it sees one of these.
+RIVER3_PLUS_SN_PREFIXES = ("R631", "R634", "R635")
+
+LED_MODE = "LED Mode"
+LED_MODE_OPTIONS = {"Off": 0, "Dim": 1, "Bright": 2, "SOS": 3}
+
+
+class River3PlusChargingPowerEntity(ChargingPowerEntity):
+    """AC charging power whose upper bound follows the device-reported limit.
+
+    The Plus reports its hardware AC charging maximum in
+    plug_in_info_ac_in_chg_hal_pow_max (650 W on a US unit), well above the
+    305 W River 3 limit; track it so the slider covers the real range.
+    """
+
+    def _updated(self, data: dict[str, Any]):
+        hal_max = data.get("plug_in_info_ac_in_chg_hal_pow_max")
+        if hal_max:
+            self._attr_native_max_value = int(hal_max)
+        super()._updated(data)
+
+
 class River3(BaseInternalDevice):
     """EcoFlow River 3 device implementation using protobuf decoding."""
 
@@ -193,8 +242,21 @@ class River3(BaseInternalDevice):
     def default_charging_power_step() -> int:
         return 50
 
+    def _is_plus(self) -> bool:
+        """True for a RIVER 3 Plus family unit (detected by serial number)."""
+        return self.device_info.sn.upper().startswith(RIVER3_PLUS_SN_PREFIXES)
+
     @override
     def sensors(self, client: EcoflowApiClient) -> list[SensorEntity]:
+        # On the Plus, AC input voltage, the PCS temperatures and bms_batt_soh
+        # only come in the runtime upload (254/22), which the unit sends only
+        # when the EcoFlow app asks for a snapshot, and whose values it does not
+        # refresh: captured replies 45 minutes apart carried identical readings
+        # (AC voltage to six decimals) while the live display/BMS data moved on.
+        # Those sensors would show a frozen (or 0 default) value as if live, so
+        # the Plus gets none of them, and state of health comes from
+        # cms_batt_soh, which the regular display upload carries.
+        is_plus = self._is_plus()
         return [
             LevelSensorEntity(client, self, "bms_batt_soc", const.MAIN_BATTERY_LEVEL)
             .attr("bms_design_cap", const.ATTR_DESIGN_CAPACITY, 0)
@@ -203,7 +265,7 @@ class River3(BaseInternalDevice):
             CapacitySensorEntity(client, self, "bms_design_cap", const.MAIN_DESIGN_CAPACITY, False),
             CapacitySensorEntity(client, self, "bms_full_cap", const.MAIN_FULL_CAPACITY, False),
             CapacitySensorEntity(client, self, "bms_remain_cap", const.MAIN_REMAIN_CAPACITY, False),
-            StateOfHealthSensorEntity(client, self, "bms_batt_soh", const.SOH),
+            StateOfHealthSensorEntity(client, self, "cms_batt_soh" if is_plus else "bms_batt_soh", const.SOH),
             LevelSensorEntity(client, self, "cms_batt_soc", const.COMBINED_BATTERY_LEVEL),
             River3ChargingStateSensorEntity(client, self, "bms_chg_dsg_state", const.BATTERY_CHARGING_STATE),
             InWattsSensorEntity(client, self, "pow_in_sum_w", const.TOTAL_IN_POWER).with_energy(),
@@ -212,7 +274,7 @@ class River3(BaseInternalDevice):
             InMilliampSensorEntity(client, self, "plug_in_info_pv_amp", const.SOLAR_IN_CURRENT),
             InWattsSensorEntity(client, self, "pow_get_ac_in", const.AC_IN_POWER),
             OutWattsAbsSensorEntity(client, self, "pow_get_ac_out", const.AC_OUT_POWER),
-            InVoltSensorEntity(client, self, "plug_in_info_ac_in_vol", const.AC_IN_VOLT),
+            *([] if is_plus else [InVoltSensorEntity(client, self, "plug_in_info_ac_in_vol", const.AC_IN_VOLT)]),
             # AC output voltage not available in proto
             OutWattsSensorEntity(client, self, "pow_get_12v", const.DC_OUT_POWER),
             OutWattsAbsSensorEntity(client, self, "pow_get_typec1", const.TYPEC_1_OUT_POWER),
@@ -221,8 +283,14 @@ class River3(BaseInternalDevice):
             RemainSensorEntity(client, self, "bms_chg_rem_time", const.CHARGE_REMAINING_TIME),
             RemainSensorEntity(client, self, "bms_dsg_rem_time", const.DISCHARGE_REMAINING_TIME),
             RemainSensorEntity(client, self, "cms_chg_rem_time", const.REMAINING_TIME),
-            TempSensorEntity(client, self, "temp_pcs_dc", "PCS DC Temperature"),
-            TempSensorEntity(client, self, "temp_pcs_ac", "PCS AC Temperature"),
+            *(
+                []
+                if is_plus
+                else [
+                    TempSensorEntity(client, self, "temp_pcs_dc", "PCS DC Temperature"),
+                    TempSensorEntity(client, self, "temp_pcs_ac", "PCS AC Temperature"),
+                ]
+            ),
             TempSensorEntity(client, self, "bms_min_cell_temp", const.BATTERY_TEMP).attr(
                 "bms_max_cell_temp", const.ATTR_MAX_CELL_TEMP, 0
             ),
@@ -245,6 +313,8 @@ class River3(BaseInternalDevice):
     @override
     def numbers(self, client: EcoflowApiClient) -> list[NumberEntity]:
         device = self
+        is_plus = self._is_plus()
+        charging_power_entity = River3PlusChargingPowerEntity if is_plus else ChargingPowerEntity
         return [
             MaxBatteryLevelEntity(
                 client,
@@ -264,13 +334,13 @@ class River3(BaseInternalDevice):
                 30,
                 lambda value: _create_river3_proto_command("cms_min_dsg_soc", int(value), device.device_data.sn),
             ),
-            ChargingPowerEntity(
+            charging_power_entity(
                 client,
                 self,
                 "plug_in_info_ac_in_chg_pow_max",
                 const.AC_CHARGING_POWER,
                 50,
-                305,
+                650 if is_plus else 305,
                 lambda value: _create_river3_proto_command(
                     "plug_in_info_ac_in_chg_pow_max", int(value), device.device_data.sn
                 ),
@@ -292,16 +362,25 @@ class River3(BaseInternalDevice):
     @override
     def switches(self, client: EcoflowApiClient) -> list[SwitchEntity]:
         device = self
+        # The Plus has no beeper setting (the EcoFlow app offers none), so it
+        # gets no beeper switch; en_beep is reported but not user-controllable.
+        beeper = (
+            []
+            if self._is_plus()
+            else [
+                BeeperEntity(
+                    client,
+                    self,
+                    "en_beep",
+                    const.BEEPER,
+                    lambda value: _create_river3_proto_command(
+                        "en_beep", 1 if value else 0, device.device_data.sn, data_len=2
+                    ),
+                )
+            ]
+        )
         return [
-            BeeperEntity(
-                client,
-                self,
-                "en_beep",
-                const.BEEPER,
-                lambda value: _create_river3_proto_command(
-                    "en_beep", 1 if value else 0, device.device_data.sn, data_len=2
-                ),
-            ),
+            *beeper,
             EnabledEntity(
                 client,
                 self,
@@ -398,6 +477,22 @@ class River3(BaseInternalDevice):
                 const.AC_TIMEOUT_OPTIONS,
                 lambda value: _create_river3_proto_command("ac_standby_time", int(value), device.device_data.sn),
             ),
+            # The Plus has a built-in light. Its state is reported as led_mode
+            # and written through the cfg_led_mode set field.
+            *(
+                [
+                    DictSelectEntity(
+                        client,
+                        self,
+                        "led_mode",
+                        LED_MODE,
+                        LED_MODE_OPTIONS,
+                        lambda value: _create_river3_proto_command("cfg_led_mode", int(value), device.device_data.sn),
+                    )
+                ]
+                if self._is_plus()
+                else []
+            ),
         ]
 
     def _decode_all_headers(self, raw_data: bytes) -> dict[str, Any]:
@@ -441,31 +536,86 @@ class River3(BaseInternalDevice):
         try:
             merged = self._decode_all_headers(raw_data)
             if not merged:
-                return super()._prepare_data(raw_data)
-
-            # River 3 firmware doesn't send cfg_ac_out_open directly. The
-            # live AC output state is carried by flow_info_ac_out instead
-            # (verified on a RIVER 3 Plus via MQTT/diagnostics: 2 == output
-            # on, 0 == output off, even with no load attached). Prefer that;
-            # fall back to the output_power_off_memory heuristic (the AC
-            # "always on" memory flag, which only approximates the real
-            # state) when flow_info_ac_out is absent. Both are skipped when
-            # the firmware sends cfg_ac_out_open directly, so that
-            # authoritative value -- like any SetReply -- always wins.
-            if "cfg_ac_out_open" not in merged:
-                ac_flow = merged.get("flow_info_ac_out")
-                if ac_flow in (0, 2):
-                    merged["cfg_ac_out_open"] = 1 if ac_flow == 2 else 0
-                elif ac_flow is None and "output_power_off_memory" in merged:
-                    merged["cfg_ac_out_open"] = (
-                        1 if merged["output_power_off_memory"] else 0
-                    )
-
-            flat = self._flatten_dict(merged)
-            return {"params": flat, "all_fields": merged}
+                return self._fallback_prepare_data(raw_data)
+            return self._finalize_fields(merged)
         except Exception as e:
             _LOGGER.debug(f"[River3] Data processing failed: {e}")
+            return self._fallback_prepare_data(raw_data)
+
+    def _fallback_prepare_data(self, raw_data: bytes) -> dict[str, Any]:
+        """Hand JSON payloads to the base parser; quietly drop other binaries.
+
+        Protobuf traffic with nothing to decode (e.g. the EcoFlow app's own
+        "get all" request, an empty header, seen on the get topic whenever
+        the app opens the device page) used to fall through to the JSON
+        parser, which logged an ERROR for every such message. JSON payloads
+        (the status topic, for one) always start with '{' or '['.
+        """
+        if bytes(raw_data).lstrip()[:1] in (b"{", b"["):
             return super()._prepare_data(raw_data)
+        _LOGGER.debug("[River3] Ignoring protobuf message with no decodable payload")
+        return {}
+
+    @override
+    def get_quota_message(self) -> River3CommandMessage:
+        """Return the protobuf 'get all' request used by quota_all()."""
+        return _create_river3_get_quota_command()
+
+    @override
+    def _prepare_data_get_topic(self, raw_data: bytes) -> PreparedData:
+        """Keep "get" requests (ours and the EcoFlow app's) as raw hex for diagnostics.
+
+        Requests carry no device state, so there is nothing to decode; as for the
+        Smart Gateway, the raw bytes are kept so the requests can be inspected
+        from the integration's diagnostics when diagnostic mode is on.
+        """
+        return PreparedData(None, None, {"proto": bytes(raw_data).hex()})
+
+    @override
+    def _prepare_data_get_reply_topic(self, raw_data: bytes) -> PreparedData:
+        """Decode the multi-header snapshot the device sends on get_reply."""
+        try:
+            merged = self._decode_all_headers(raw_data)
+        except Exception as e:
+            _LOGGER.debug("[River3] get_reply parse failed: %s", e)
+            merged = {}
+        if not merged:
+            return PreparedData(None, None, {"proto": raw_data.hex()})
+        return PreparedData(None, self._finalize_fields(merged), {"proto": raw_data.hex()})
+
+    def _finalize_fields(self, merged: dict[str, Any]) -> dict[str, Any]:
+        """Derive computed fields and flatten decoded protobuf data."""
+        # River 3 firmware doesn't send cfg_ac_out_open directly. The
+        # live AC output state is carried by flow_info_ac_out instead
+        # (verified on a RIVER 3 Plus via MQTT/diagnostics: 2 == output
+        # on, 0 == output off, even with no load attached). Prefer that;
+        # fall back to the output_power_off_memory heuristic (the AC
+        # "always on" memory flag, which only approximates the real
+        # state) when flow_info_ac_out is absent. Both are skipped when
+        # the firmware sends cfg_ac_out_open directly, so that
+        # authoritative value -- like any SetReply -- always wins.
+        if "cfg_ac_out_open" not in merged:
+            ac_flow = merged.get("flow_info_ac_out")
+            if ac_flow in (0, 2):
+                merged["cfg_ac_out_open"] = 1 if ac_flow == 2 else 0
+            elif ac_flow is None and "output_power_off_memory" in merged:
+                merged["cfg_ac_out_open"] = (
+                    1 if merged["output_power_off_memory"] else 0
+                )
+
+        # Same story for the DC 12V port: cfg_dc12v_out_open only appears in
+        # set commands/replies. The reported state is flow_info_12v (port
+        # flow bitmask: low two bits 0b10/0b11 == on, as the EcoFlow app
+        # reads it), with dc_out_open (Display field 74) as a fallback.
+        if "cfg_dc12v_out_open" not in merged:
+            dc_flow = merged.get("flow_info_12v")
+            if dc_flow is not None:
+                merged["cfg_dc12v_out_open"] = 1 if (int(dc_flow) & 0b11) in (0b10, 0b11) else 0
+            elif "dc_out_open" in merged:
+                merged["cfg_dc12v_out_open"] = 1 if merged["dc_out_open"] else 0
+
+        flat = self._flatten_dict(merged)
+        return {"params": flat, "all_fields": merged}
 
     def _perform_xor_decode(self, pdata: bytes, header_info: dict[str, Any]) -> bytes:
         """Perform XOR decoding if required by header info."""
