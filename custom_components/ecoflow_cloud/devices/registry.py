@@ -75,7 +75,7 @@ devices: OrderedDict[str, Type[BaseDevice]] = OrderedDict[str, Type[BaseDevice]]
         "DELTA_PRO_ULTRA_X": internal_delta_pro_ultra_x.DeltaProUltraX,
         "SMART_HOME_PANEL_3": internal_smart_home_panel_3.SmartHomePanel3,
         "SMART_GATEWAY": internal_smart_gateway.SmartGateway,  # HR65 — 200A gateway, 6 circuits
-        # C101 — PowerPulse EV Charger (9.6 kW, US); diagnostic capture only for now
+        # C101 — PowerPulse EV Charger (9.6 kW, US)
         "POWERPULSE": internal_powerpulse.PowerPulse,
         # Ocean Pro is two devices on two MQTT streams; the user selects the
         # matching type per serial number in the manual (app-API) flow.

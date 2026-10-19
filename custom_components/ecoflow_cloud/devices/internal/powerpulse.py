@@ -118,8 +118,16 @@ _GATEWAY_NOISY_FIELDS = frozenset(
 _ORIGINS = {"ios": "EcoFlow app", "android": "EcoFlow app", "homeassistant": "Home Assistant"}
 
 
+# Gateway fields never put in the timeline: the site's configured location
+# (see smart_gateway.py). The timeline goes into the diagnostics download,
+# which people attach to public issues.
+_GATEWAY_PRIVATE_FIELDS = frozenset({"1236", "1238", "1240"})
+
+
 def _gateway_timeline_filter(path: str, value: Any) -> bool:
     top = path.split(".", 1)[0].split("[", 1)[0]
+    if top in _GATEWAY_PRIVATE_FIELDS:
+        return False
     return top not in _GATEWAY_NOISY_FIELDS and not isinstance(value, float)
 
 
