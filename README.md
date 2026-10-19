@@ -5,6 +5,7 @@ This fork of [tolwi/hassio-ecoflow-cloud](https://github.com/tolwi/hassio-ecoflo
 - **[EcoFlow Smart Gateway](#ecoflow-smart-gateway) support:** monitoring and control of the 200A Smart Gateway (HR65) and its paired DELTA Pro Ultras.
 - **[Per-battery sensors](#delta-pro-ultra-per-battery-sensors) for the EcoFlow DELTA Pro Ultra** (developer API connection). Submitted upstream as [pull request #927](https://github.com/tolwi/hassio-ecoflow-cloud/pull/927).
 - **[River 3 and River 3 Plus](#river-3-and-river-3-plus) fixes:** battery level, settings and switches now fill in, and a River 3 Plus is recognized automatically, with its own charging range and LED control.
+- **[PowerPulse EV Charger](#powerpulse-ev-charger) support:** state, faults, energy, and start/stop, mode and current controls.
 - **[DELTA Pro Ultra X](#delta-pro-ultra-x) output sensors**, and **[stall detection](#telemetry-stalls-smart-gateway-and-delta-pro-ultra-x)** for the gateway's and the DPU X's live data, which can freeze without any sign in Home Assistant.
 - **[Fewer recorder writes](#fewer-recorder-writes)** from power, remaining-time and energy sensors, for every device.
 - **[A capture decoder](#decoding-a-debug-capture)** that turns a DEBUG log into readable frames, for diagnosing devices.
@@ -90,6 +91,24 @@ Both devices now have two diagnostic binary sensors:
 For the gateway, the integration also asks for a fresh snapshot 10 seconds into a stall and then every 5 seconds for up to 3 minutes, instead of waiting for the next 30-second refresh. If the gateway reports that it has dropped to its slow update rate (a **Reporting Interval** above 2 s, seen after it reconnects to EcoFlow's cloud), it asks straight away, which puts it back on 2-second updates.
 
 Each stall fires the Home Assistant events `ecoflow_cloud_stream_stalled` and `ecoflow_cloud_stream_resumed` (with the serial, name, start time, duration and refresh counts), for automations or the logbook.
+
+## PowerPulse EV Charger
+
+The EcoFlow PowerPulse (9.6 kW, US; serial starts with `C101`) had no profile. This adds one, decoded from captures of a PowerPulse on a Smart Gateway's inlet port AC1.
+
+### Adding the charger
+
+Add it to an entry with your **EcoFlow account** (email and password): device type **`POWERPULSE`**, with the charger's serial number from the EcoFlow app.
+
+### What it adds
+
+- **Sensors:** charger state (unplugged, connected, charging, fault, stopped), active fault codes, last event, charging power, current and voltage, session and lifetime energy, control pilot level and duty cycle, the power the system allots the charger, and Wi-Fi signal. Also a fault binary sensor.
+- **Controls:** Charging (start/stop), Charging Mode (Fast Charge, Custom or Solar and Battery) and Custom Current (6–40 A; setting it selects Custom, as in the app). Each sends the EcoFlow app's own command and is sent once more if the charger doesn't acknowledge it.
+- **Diagnostic Capture** switch (off at every start of Home Assistant): records every message the charger and its gateway send, and every command sent to them, to `<config>/ecoflow_capture/` until switched off, for working out new fields or faults. **Capture Marker** writes a numbered line to separate attempts. The capture files hold the raw messages, including the gateway's configured location, so don't share them as they are. The diagnostics download carries a short timeline of the capture with the location left out.
+
+### Tested with, and limits
+
+- Built and tested on one PowerPulse on a Smart Gateway (firmware as of October 2026), charging one car. Fields not listed in `powerpulse_protocol.py` aren't understood yet; a capture of anything new is welcome in an issue.
 
 ## DELTA Pro Ultra per-battery sensors
 
