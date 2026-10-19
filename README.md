@@ -5,7 +5,9 @@ This fork of [tolwi/hassio-ecoflow-cloud](https://github.com/tolwi/hassio-ecoflo
 - **[EcoFlow Smart Gateway](#ecoflow-smart-gateway) support:** monitoring and control of the 200A Smart Gateway (HR65) and its paired DELTA Pro Ultras.
 - **[Per-battery sensors](#delta-pro-ultra-per-battery-sensors) for the EcoFlow DELTA Pro Ultra** (developer API connection). Submitted upstream as [pull request #927](https://github.com/tolwi/hassio-ecoflow-cloud/pull/927).
 - **[River 3 and River 3 Plus](#river-3-and-river-3-plus) fixes:** battery level, settings and switches now fill in, and a River 3 Plus is recognized automatically, with its own charging range and LED control.
+- **[DELTA Pro Ultra X](#delta-pro-ultra-x) output sensors**, and **[stall detection](#telemetry-stalls-smart-gateway-and-delta-pro-ultra-x)** for the gateway's and the DPU X's live data, which can freeze without any sign in Home Assistant.
 - **[Fewer recorder writes](#fewer-recorder-writes)** from power, remaining-time and energy sensors, for every device.
+- **[A capture decoder](#decoding-a-debug-capture)** that turns a DEBUG log into readable frames, for diagnosing devices.
 
 Everything else is identical to upstream. For general setup and the other supported devices, see the [upstream README](https://github.com/tolwi/hassio-ecoflow-cloud#readme).
 
@@ -28,6 +30,10 @@ The gateway is only reachable through EcoFlow's app connection, not the develope
 - Home load, grid (total and per leg: power, voltage, current), solar from all paired DPUs, DPU output, and battery charging / discharging, each with a kWh total for the Energy dashboard
 - Combined battery level, backup reserve, charge / discharge time remaining
 - Per smart circuit: power (with kWh), voltage and current, named after the circuit labels set in the EcoFlow app. 240V circuits appear once, with both legs combined. Pairing or splitting circuits in the app is picked up automatically.
+- **S.I.B. AC1–AC3 Activity:** what each Smart Inlet Box port is doing: Off, Idle, Supplying home or Grid charging (another value shows as "Unknown (n)").
+- **Reporting Interval** (diagnostic): how often the gateway is pushing updates, normally 2 s. See [telemetry stalls](#telemetry-stalls-smart-gateway-and-delta-pro-ultra-x).
+- **Firmware Version** (diagnostic).
+- **Telemetry Stalled** and **Data Stale** (diagnostic): see [telemetry stalls](#telemetry-stalls-smart-gateway-and-delta-pro-ultra-x).
 
 ### Controls
 
@@ -49,9 +55,41 @@ Each control checks that the gateway reported the change and sends it once more 
 
 - Built and tested on one Smart Gateway with two DELTA Pro Ultras (firmware as of October 2026). The message fields were decoded from that setup; other firmware may differ. Please open an issue with a diagnostics download if something looks wrong.
 - **Inlet box controls** were tested with DELTA Pro Ultras on all three ports and an EV charger on AC1. Port on/off and Charge Now use the same commands on every port, whatever is attached. Charge Now with an EV charger and the DELTA Pro Ultra X are untested.
-- **Inlet port names** use the attached device's name in Home Assistant when it's also set up in this integration (matched by serial number), otherwise its type ("DPU", "EV Charger"). A device type the integration doesn't recognize (possibly the DELTA Pro Ultra X) shows only the port, e.g. "S.I.B. AC1"; a diagnostics download shows its type code (`inlet_acN_type`), so please open an issue with one.
+- **Inlet port names** use the attached device's name in Home Assistant when it's also set up in this integration (matched by serial number), otherwise its type ("DPU", "EV Charger"). A DELTA Pro Ultra X reports as a DPU. A device type the integration doesn't recognize shows only the port, e.g. "S.I.B. AC1"; a diagnostics download shows its type code (`inlet_acN_type`), so please open an issue with one.
+- **Inlet port activity** only arrives with the gateway's live updates, not with the full snapshots, so it can take a minute to show after a restart. Its values were seen with DPUs supplying the house, idle and grid charging; an EV charger may report others.
 - The backup reserve's minimum and the charging power's minimum and step size are assumptions; the app's own limits win if they differ.
 - With the EcoFlow app closed the gateway only pushes updates every few minutes, so the integration requests a full snapshot every 30 seconds.
+
+## DELTA Pro Ultra X
+
+The DELTA Pro Ultra X (app connection, device type `DELTA_PRO_ULTRA_X`) gets these diagnostic sensors on top of its existing ones. Together they show the moment its AC output stops, which the power sensors alone can't tell apart from a quiet house:
+
+| Sensor | What it shows |
+|---|---|
+| AC Port Voltage | Voltage at its AC port: about 241 V while it supplies the house, about 0 V while its output is off. Once the gateway has switched the backup side to the grid, it reads the grid voltage (about 245 V) instead. |
+| AC Output State | "Supplying" or "Not supplying". The raw value (2 or 1) is an attribute. |
+| Energy Backup State | 0 while supplying, 2 while not (the DPU X's own backup flag). |
+| AC Port Current | Disabled by default. Follows the load, but reads 15–40% above output power ÷ voltage and about 4 A even while idle on grid, so it isn't a measure of real power. |
+| Telemetry Stalled, Data Stale | See below. |
+
+These were decoded from captures of a DPU X on a Smart Gateway through two unexplained drops of its output and a normal fallback to grid at the backup reserve. In all three, AC Output State and Energy Backup State changed within half a second of the voltage, and the error code stayed 0.
+
+An automation can flag a drop with a trigger on **AC Output State** changing to "Not supplying" (or **AC Port Voltage** below 50 V), with conditions that the gateway is in Self-Powered mode and the battery is above the backup reserve.
+
+The DPU X also sends two or three messages bundled together about once a minute. The integration used to read only the first, so some updates, including the per-leg output power, were dropped. All of them are read now.
+
+## Telemetry stalls (Smart Gateway and DELTA Pro Ultra X)
+
+The Smart Gateway and the DPU X push an update about every 2 seconds. Captures from a gateway showed it going silent for 28 seconds to 4.4 minutes. During the long silence, its replies to the integration's 30-second refresh kept arriving but carried a frozen copy of its last update, and two came back empty. Home Assistant kept showing the frozen values, with the device online, for the whole time.
+
+Both devices now have two diagnostic binary sensors:
+
+- **Telemetry Stalled** turns on after 15 seconds without an update. Its attributes show when the stall started, the last stall's length, and what the refreshes got back.
+- **Data Stale** turns on while stalled and nothing new has arrived for 15 seconds. A refresh reply that only repeats values already known is no longer treated as new data.
+
+For the gateway, the integration also asks for a fresh snapshot 10 seconds into a stall and then every 5 seconds for up to 3 minutes, instead of waiting for the next 30-second refresh. If the gateway reports that it has dropped to its slow update rate (a **Reporting Interval** above 2 s, seen after it reconnects to EcoFlow's cloud), it asks straight away, which puts it back on 2-second updates.
+
+Each stall fires the Home Assistant events `ecoflow_cloud_stream_stalled` and `ecoflow_cloud_stream_resumed` (with the serial, name, start time, duration and refresh counts), for automations or the logbook.
 
 ## DELTA Pro Ultra per-battery sensors
 
@@ -145,3 +183,23 @@ EcoFlow devices push readings every few seconds and the values jitter, so nearly
 - **kWh totals** still integrate every reading, but write their state at most once a minute.
 
 Graphs, 5-minute statistics and energy totals stay accurate (within a few Wh a day in testing).
+
+## Decoding a debug capture
+
+`scripts/decode_capture.py` reads a Home Assistant log with DEBUG enabled for `custom_components.ecoflow_cloud.api.ecoflow_mqtt` and decodes every EcoFlow message in it: each header (source, destination, command, sequence) and the payload's fields by number. It needs only Python 3.10 or later, not Home Assistant.
+
+```
+python3 scripts/decode_capture.py home-assistant.log                               # every frame, changed fields only
+python3 scripts/decode_capture.py home-assistant.log --sn P101 --fields 4,6,120,756 # chosen fields of one device
+python3 scripts/decode_capture.py home-assistant.log --gaps 10                      # update pauses over 10 s, repeated snapshots
+python3 scripts/decode_capture.py home-assistant.log --from 22:36:50 --to 22:37:30
+```
+
+To enable the DEBUG log, add this to `configuration.yaml` and restart:
+
+```yaml
+logger:
+  default: warning
+  logs:
+    custom_components.ecoflow_cloud.api.ecoflow_mqtt: debug
+```

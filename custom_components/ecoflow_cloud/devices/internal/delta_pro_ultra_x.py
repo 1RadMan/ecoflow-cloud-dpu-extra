@@ -1,14 +1,23 @@
 import logging
+from collections.abc import Sequence
 from typing import Any, ClassVar, override
 
+from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.components.number import NumberEntity
 from homeassistant.components.select import SelectEntity
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.components.switch import SwitchEntity
 
 from custom_components.ecoflow_cloud.api import EcoflowApiClient
+from custom_components.ecoflow_cloud.binary_sensor import stream_watch_binary_sensors
 from custom_components.ecoflow_cloud.devices import const
 from custom_components.ecoflow_cloud.devices.internal.delta_pro_3 import DeltaPro3
+from custom_components.ecoflow_cloud.devices.internal.smart_home_panel_3 import (
+    WIRE_F32,
+    WIRE_VARINT,
+    _first,
+    _parse_fields,
+)
 from custom_components.ecoflow_cloud.devices.internal.proto import (
     ef_delta_pro_ultra_x_pb2 as dpux,
 )
@@ -32,6 +41,24 @@ _LOGGER = logging.getLogger(__name__)
 
 # The DPU X supports up to 10 external battery packs.
 MAX_PACKS = 10
+
+# DisplayPropertyUpload (254/21) fields absent from the DP3 proto, read with a
+# raw pass. From captures of a DPU X on a Smart Gateway (inlet AC3), with the
+# house on battery, through two drops of its AC output and a normal fallback to
+# grid at the backup reserve:
+#   120  AC port voltage, V (F32): ~241 while it supplies the house, ~0 while
+#        its output is off; reads the grid (~245) once the gateway has
+#        switched the backup side to grid. Sent when it changes.
+#   121  AC port current, A (F32): follows the load, but runs 15-40% above
+#        output power / voltage and reads ~4.4 A while idle on grid, so it is
+#        not a measure of real power.
+#   756  2 while the DPU X supplies the house, 1 while it doesn't (both in
+#        those drops and when on grid); flips with energy_backup_state (field
+#        6: 0 supplying / 2 not), within ~0.3 s.
+F_AC_PORT_VOL = 120
+F_AC_PORT_AMP = 121
+F_AC_OUTPUT_STATE = 756
+AC_OUTPUT_STATES: dict[int, str] = {1: "Not supplying", 2: "Supplying"}
 
 
 class _PhaseWattsSensorEntity(InWattsSensorEntity):
@@ -68,6 +95,13 @@ class _ChargingStateTextEntity(MiscSensorEntity):
         return super()._update_value(self._LABELS.get(int(val), "Unknown"))
 
 
+class _AcOutputStateEntity(MiscSensorEntity):
+    """Field 756 as text ("Supplying" / "Not supplying"), raw value as an attribute."""
+
+    def _update_value(self, val: Any) -> bool:
+        return super()._update_value(AC_OUTPUT_STATES.get(int(val), f"Unknown ({int(val)})"))
+
+
 class DeltaProUltraX(DeltaPro3):
     """DELTA Pro Ultra X (private / app API).
 
@@ -77,7 +111,13 @@ class DeltaProUltraX(DeltaPro3):
     main battery (energy is in external packs), so bms_* main-battery sensors are
     dropped and cms_batt_soc is the headline. Control entities are suppressed for
     now — read-only until actuation is deliberately in scope.
+
+    Its push stream is watched (see stream_watch.py): it normally pushes every
+    ~2 s, so a 15 s gap shows as "Telemetry Stalled". It isn't asked for
+    snapshots: the stall flags only report.
     """
+
+    STREAM_STALL_SEC = 15.0
 
     @override
     def sensors(self, client: EcoflowApiClient) -> list[SensorEntity]:
@@ -95,6 +135,17 @@ class DeltaProUltraX(DeltaPro3):
             RemainSensorEntity(client, self, "cms_chg_rem_time", const.CHARGE_REMAINING_TIME),
             RemainSensorEntity(client, self, "cms_dsg_rem_time", const.DISCHARGE_REMAINING_TIME),
             QuotaStatusSensorEntity(client, self),
+            # --- AC output (diagnostic) ---
+            # Whether the DPU X is actually supplying the house: the voltage at
+            # its AC port drops to ~0 and 756 / energy_backup_state flip when
+            # its output stops, which the power sensors alone can't tell from
+            # a quiet load.
+            VoltSensorEntity(client, self, "ac_port_vol", "AC Port Voltage", diagnostic=True),
+            _AcOutputStateEntity(client, self, "ac_output_state", "AC Output State").attr(
+                "ac_output_state", "raw_value", None
+            ),
+            MiscSensorEntity(client, self, "energy_backup_state", "Energy Backup State"),
+            AmpSensorEntity(client, self, "ac_port_amp", "AC Port Current", False, diagnostic=True),
             # --- Detail (disabled by default) ---
             # Per-pack SoC (field 786), all 10 bays; unpopulated bays stay
             # unavailable.
@@ -176,6 +227,10 @@ class DeltaProUltraX(DeltaPro3):
         return []
 
     @override
+    def binary_sensors(self, client: EcoflowApiClient) -> Sequence[BinarySensorEntity]:
+        return stream_watch_binary_sensors(client, self)
+
+    @override
     def _decode_message_by_type(self, pdata: bytes, header_info: dict[str, Any]) -> dict[str, Any]:
         # DP3 decode drops the per-pack array (DisplayPropertyUpload field 786,
         # absent from its proto). Recover it with a second pass over the same
@@ -192,4 +247,15 @@ class DeltaProUltraX(DeltaPro3):
                     result[f"bp_{pack.bay}_temp"] = pack.temp
             except Exception as e:
                 _LOGGER.debug("DPU X per-pack (field 786) parse skipped: %s", e)
+            # AC port fields (see F_AC_PORT_VOL...): written only when present,
+            # as incremental frames carry only what changed.
+            fields = _parse_fields(pdata)
+            for key, no, wire in (
+                ("ac_port_vol", F_AC_PORT_VOL, WIRE_F32),
+                ("ac_port_amp", F_AC_PORT_AMP, WIRE_F32),
+                ("ac_output_state", F_AC_OUTPUT_STATE, WIRE_VARINT),
+            ):
+                v = _first(fields, no, wire)
+                if v is not None:
+                    result[key] = round(v, 3) if wire == WIRE_F32 else v
         return result

@@ -353,36 +353,53 @@ class DeltaPro3(BaseInternalDevice):
         try:
             _LOGGER.debug(f"Processing {len(raw_data)} bytes of raw data")
 
-            # 1. Decode HeaderMessage
-            header_info = self._decode_header_message(raw_data)
-            if not header_info:
+            # 1. Decode HeaderMessage. A frame can carry several headers (the
+            # DPU X sends 254/21 + 254/21 + 254/22 about once a minute); decode
+            # them all, in order, so later headers update earlier ones.
+            headers = self._decode_header_messages(raw_data)
+            if not headers:
                 _LOGGER.warning("HeaderMessage decoding failed, trying JSON fallback")
                 return super()._prepare_data(raw_data)
 
-            # 2. Extract payload data
-            pdata = self._extract_payload_data(header_info.get("header_obj"))
-            if not pdata:
+            flat: dict[str, Any] = {}
+            decoded_data = {}
+            had_payload = False
+            for header_info in headers:
+                # 2. Extract payload data (the "no pdata" warning only when no header has any)
+                if not getattr(header_info.get("header_obj"), "pdata", b""):
+                    continue
+                pdata = self._extract_payload_data(header_info.get("header_obj"))
+                if not pdata:
+                    continue
+                had_payload = True
+
+                # 3. XOR decode (if needed)
+                decoded_pdata = self._perform_xor_decode(pdata, header_info)
+
+                # 4. Protobuf message decode
+                decoded = self._decode_message_by_type(decoded_pdata, header_info)
+                if not decoded:
+                    # Routine: devices interleave frames carrying only fields the
+                    # proto doesn't declare (or unknown cmdIds).
+                    _LOGGER.debug(
+                        "No known fields in message (cmdFunc=%s, cmdId=%s, %d bytes)",
+                        header_info.get("cmdFunc"),
+                        header_info.get("cmdId"),
+                        len(decoded_pdata),
+                    )
+                    continue
+                decoded_data.update(decoded)
+                flat.update(self._flatten_dict(decoded))
+
+            if not had_payload:
+                self._extract_payload_data(headers[0].get("header_obj"))
                 _LOGGER.warning("No payload data found")
                 return {}
-
-            # 3. XOR decode (if needed)
-            decoded_pdata = self._perform_xor_decode(pdata, header_info)
-
-            # 4. Protobuf message decode
-            decoded_data = self._decode_message_by_type(decoded_pdata, header_info)
-            if not decoded_data:
-                # Routine: devices interleave frames carrying only fields the
-                # proto doesn't declare (or unknown cmdIds).
-                _LOGGER.debug(
-                    "No known fields in message (cmdFunc=%s, cmdId=%s, %d bytes)",
-                    header_info.get("cmdFunc"),
-                    header_info.get("cmdId"),
-                    len(decoded_pdata),
-                )
+            if not flat:
                 return {}
 
-            # 5. Flatten all fields for params
-            flat_dict = self._flatten_dict(decoded_data)
+            # 5. Flattened fields for params
+            flat_dict = flat
             _LOGGER.debug(f"Flat dict for params (all fields): {flat_dict}")  # noqa: G004
         except Exception as e:
             _LOGGER.error(f"[DeltaPro3] Data processing failed: {e}", exc_info=True)
@@ -402,7 +419,12 @@ class DeltaPro3(BaseInternalDevice):
         }
 
     def _decode_header_message(self, raw_data: bytes) -> dict[str, Any] | None:
-        """Decode HeaderMessage and extract header info."""
+        """Decode HeaderMessage and extract the first header's info."""
+        headers = self._decode_header_messages(raw_data)
+        return headers[0] if headers else None
+
+    def _decode_header_messages(self, raw_data: bytes) -> list[dict[str, Any]]:
+        """Decode HeaderMessage and extract every header's info, in order."""
         try:
             # Try Base64 decode
             import base64
@@ -421,42 +443,43 @@ class DeltaPro3(BaseInternalDevice):
             except AttributeError as e:
                 _LOGGER.error(f"HeaderMessage class not found in pb2 module: {e}")
                 _LOGGER.debug(f"Available classes in pb2: {[attr for attr in dir(dp3) if not attr.startswith('_')]}")
-                return None
+                return []
             except Exception as e:
                 _LOGGER.error(f"Failed to parse HeaderMessage: {e}")
                 _LOGGER.debug(f"Raw data length: {len(raw_data)}, first 20 bytes: {raw_data[:20].hex()}")
-                return None
+                return []
 
             if not header_msg.header:
                 _LOGGER.debug("No headers found in HeaderMessage")
-                return None
+                return []
 
-            # Use the first header (usually single)
-            header = header_msg.header[0]
-            header_info = {
-                "src": getattr(header, "src", 0),
-                "dest": getattr(header, "dest", 0),
-                "dSrc": getattr(header, "d_src", 0),
-                "dDest": getattr(header, "d_dest", 0),
-                "encType": getattr(header, "enc_type", 0),
-                "checkType": getattr(header, "check_type", 0),
-                "cmdFunc": getattr(header, "cmd_func", 0),
-                "cmdId": getattr(header, "cmd_id", 0),
-                "dataLen": getattr(header, "data_len", 0),
-                "needAck": getattr(header, "need_ack", 0),
-                "seq": getattr(header, "seq", 0),
-                "productId": getattr(header, "product_id", 0),
-                "version": getattr(header, "version", 0),
-                "payloadVer": getattr(header, "payload_ver", 0),
-                "header_obj": header,
-            }
-
-            _LOGGER.debug(f"Header decoded: cmdFunc={header_info['cmdFunc']}, cmdId={header_info['cmdId']}")
-            return header_info
+            return [self._header_info(header) for header in header_msg.header]
 
         except Exception as e:
             _LOGGER.debug(f"HeaderMessage decode failed: {e}")
-            return None
+            return []
+
+    def _header_info(self, header: Any) -> dict[str, Any]:
+        header_info = {
+            "src": getattr(header, "src", 0),
+            "dest": getattr(header, "dest", 0),
+            "dSrc": getattr(header, "d_src", 0),
+            "dDest": getattr(header, "d_dest", 0),
+            "encType": getattr(header, "enc_type", 0),
+            "checkType": getattr(header, "check_type", 0),
+            "cmdFunc": getattr(header, "cmd_func", 0),
+            "cmdId": getattr(header, "cmd_id", 0),
+            "dataLen": getattr(header, "data_len", 0),
+            "needAck": getattr(header, "need_ack", 0),
+            "seq": getattr(header, "seq", 0),
+            "productId": getattr(header, "product_id", 0),
+            "version": getattr(header, "version", 0),
+            "payloadVer": getattr(header, "payload_ver", 0),
+            "header_obj": header,
+        }
+
+        _LOGGER.debug(f"Header decoded: cmdFunc={header_info['cmdFunc']}, cmdId={header_info['cmdId']}")
+        return header_info
 
     def _extract_payload_data(self, header_obj: Any) -> bytes | None:
         """Extract payload bytes from header."""

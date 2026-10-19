@@ -131,6 +131,27 @@ All gateway controls check that the gateway reports the new state, and send
 the command once more if it hasn't within CONFIRM_TIMEOUT_SEC (see
 _ConfirmedCommand).
 
+Inlet port activity: sub-field 6 of each port block (1224 + i), seen as 1 off,
+2 idle, 3 supplying the house, 4 grid charging. Only pushes carry it (the
+snapshot sent back for "get all" leaves it out), so it is written only when
+present.
+
+Reporting profile: 254/22 fields 293..296 (decoded by the DP3 proto as the
+display/runtime full and incremental upload periods, in ms). While refreshed
+every QUOTA_REFRESH_SEC the gateway pushes every 2 s (294 = 2000); when it
+reconnects to the cloud it can come back in its idle profile (294 = 60000,
+pushes a minute apart) until the next "get all". A push reporting anything
+slower than FAST_PUSH_MS asks for a refresh at once.
+
+Push stream: watched (STREAM_STALL_SEC; see stream_watch.py). Captures from a
+gateway in Self-Powered mode showed it going silent for 28 s to 4.4 min while
+the "get all" replies kept arriving with a frozen snapshot (byte-identical,
+and equal to its last push), and twice with no payload. Those replies are no
+longer merged as fresh data; "Telemetry Stalled" / "Data Stale" show the gap,
+and the gateway is asked again every few seconds while it lasts.
+
+Firmware: field 176 of 254/22 (pd_firm_ver), four bytes, shown as a.b.c.d.
+
 The frames also carry the site's configured location (fields 1236/1238/1240);
 it is deliberately never surfaced.
 """
@@ -138,15 +159,17 @@ it is deliberately never surfaced.
 import asyncio
 import json
 import logging
+from collections.abc import Sequence
 from functools import partial
 from typing import Any, ClassVar, Self, override
 
 from google.protobuf.json_format import MessageToDict
+from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberMode
 from homeassistant.components.select import SelectEntity
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.components.switch import SwitchEntity
-from homeassistant.const import PERCENTAGE, UnitOfPower
+from homeassistant.const import PERCENTAGE, UnitOfPower, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
@@ -156,6 +179,7 @@ from homeassistant.helpers.storage import Store
 
 from custom_components.ecoflow_cloud.api import EcoflowApiClient
 from custom_components.ecoflow_cloud.api.message import Message, PrivateAPIMessageProtocol
+from custom_components.ecoflow_cloud.binary_sensor import stream_watch_binary_sensors
 from custom_components.ecoflow_cloud.devices import const
 from custom_components.ecoflow_cloud.devices.data_holder import PreparedData
 from custom_components.ecoflow_cloud.devices.internal.proto import ef_dp3_iobroker_pb2 as dp3
@@ -169,6 +193,7 @@ from custom_components.ecoflow_cloud.devices.internal.smart_home_panel_3 import 
     _first,
     _parse_fields,
 )
+from custom_components.ecoflow_cloud.entities import BaseSensorEntity
 from custom_components.ecoflow_cloud.number import ValueUpdateEntity
 from custom_components.ecoflow_cloud.select import DictSelectEntity
 from custom_components.ecoflow_cloud.sensor import (
@@ -177,6 +202,7 @@ from custom_components.ecoflow_cloud.sensor import (
     InVoltSensorEntity,
     InWattsSensorEntity,
     LevelSensorEntity,
+    MiscSensorEntity,
     OutVoltSensorEntity,
     QuotaScheduledStatusSensorEntity,
     RemainSensorEntity,
@@ -248,6 +274,11 @@ F_INLET_ACC_BASE = 1255
 INLET_ON, INLET_OFF = 1, 2
 INLET_TYPE_DPU, INLET_TYPE_EV_CHARGER = 1, 3
 INLET_DEVICE_TYPES: dict[int, str] = {INLET_TYPE_DPU: "DPU", INLET_TYPE_EV_CHARGER: "EV Charger"}
+# Port block sub-field 6: what the port is doing.
+INLET_ACTIVITY: dict[int, str] = {1: "Off", 2: "Idle", 3: "Supplying home", 4: "Grid charging"}
+
+# Push interval (ms, 254/22 field 294) of the gateway's fast reporting profile.
+FAST_PUSH_MS = 2000
 
 
 def _charge_now_key(port: int) -> str:
@@ -679,8 +710,44 @@ class CircuitSourceSelectEntity(_ConfirmedSelect, _ControlCircuitNamed, DictSele
     _attr_icon = "mdi:transmission-tower"
 
 
+class _InletActivitySensorEntity(MiscSensorEntity):
+    """Inlet port activity (sub-field 6) as text."""
+
+    _attr_entity_category = None
+    _attr_icon = "mdi:transmission-tower-export"
+
+    def _update_value(self, val: Any) -> bool:
+        return super()._update_value(INLET_ACTIVITY.get(int(val), f"Unknown ({int(val)})"))
+
+
+class _ReportingIntervalSensorEntity(BaseSensorEntity):
+    """Push interval of the current reporting profile (ms on the wire), in s."""
+
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:timer-sync-outline"
+
+    def _update_value(self, val: Any) -> bool:
+        return super()._update_value(round(int(val) / 1000, 1))
+
+
+class _FirmwareVersionSensorEntity(MiscSensorEntity):
+    """Four-byte version number shown as a.b.c.d."""
+
+    _attr_icon = "mdi:chip"
+
+    def _update_value(self, val: Any) -> bool:
+        v = int(val)
+        return super()._update_value(".".join(str((v >> shift) & 0xFF) for shift in (24, 16, 8, 0)))
+
+
 class SmartGateway(SmartHomePanel3):
     """EcoFlow Smart Gateway (HR65…, private / app API)."""
+
+    # Pushes every ~2.25 s while refreshed; answers "get all" (see stream_watch.py).
+    STREAM_STALL_SEC = 15.0
+    STREAM_REFRESH = True
 
     # 6 smart circuits; the metadata block for them is 794..799 and the power
     # array 1015..1020 (two further empty slots, 7-8, are not exposed).
@@ -888,8 +955,23 @@ class SmartGateway(SmartHomePanel3):
             # Backup-side voltage — disabled by default, diagnostic.
             OutVoltSensorEntity(client, self, "gw_backup_l1_vol", "Backup L1 Voltage", False, diagnostic=True),
             OutVoltSensorEntity(client, self, "gw_backup_l2_vol", "Backup L2 Voltage", False, diagnostic=True),
+            # What each Smart Inlet Box port is doing (pushes only; see docstring).
+            *[
+                _InletActivitySensorEntity(client, self, f"inlet_ac{n}_activity", f"S.I.B. AC{n} Activity")
+                for n in range(1, INLET_PORTS + 1)
+            ],
+            _ReportingIntervalSensorEntity(
+                client, self, "display_property_incremental_upload_period", "Reporting Interval"
+            ),
+            _FirmwareVersionSensorEntity(client, self, "pd_firm_ver", "Firmware Version").attr(
+                "pd_firm_ver", "raw_value", None
+            ),
         ]
         return out + self.circuit_sensors(client)
+
+    @override
+    def binary_sensors(self, client: EcoflowApiClient) -> Sequence[BinarySensorEntity]:
+        return stream_watch_binary_sensors(client, self)
 
     @override
     def numbers(self, client: EcoflowApiClient) -> list[NumberEntity]:
@@ -1107,6 +1189,9 @@ class SmartGateway(SmartHomePanel3):
                 kind = _first(values, 2, WIRE_VARINT)
                 self._inlet.setdefault(n, {})["type"] = kind
                 result[f"inlet_ac{n}_type"] = kind or 0  # 0 = nothing attached
+                activity = _first(values, 6, WIRE_VARINT)
+                if activity is not None:  # absent from "get all" snapshots: unchanged, not 0
+                    result[f"inlet_ac{n}_activity"] = activity
             for slot, base in (("dpu_sn", F_INLET_DPU_BASE), ("acc_sn", F_INLET_ACC_BASE)):
                 device = _first(fields, base + i, WIRE_LEN)
                 if device is None:
@@ -1121,6 +1206,21 @@ class SmartGateway(SmartHomePanel3):
     def get_quota_message(self) -> Message:
         """Protobuf "get all" request (the JSON latestQuotas default is ignored)."""
         return _GetAllRequest()
+
+    @override
+    def _prepare_data_data_topic(self, raw_data: bytes) -> PreparedData:
+        """As for the DP3; plus, a push reporting a slow profile asks for a refresh."""
+        data = super()._prepare_data_data_topic(raw_data)
+        params = (data.params or {}).get("params") or {}
+        interval = params.get("display_property_incremental_upload_period")
+        if interval is not None and int(interval) > FAST_PUSH_MS and self.stream_watch is not None:
+            _LOGGER.info(
+                "Smart Gateway %s: reporting every %.0f s, asking for a snapshot to restore 2 s updates",
+                self.device_info.sn,
+                int(interval) / 1000,
+            )
+            self.stream_watch.request_refresh()
+        return data
 
     @override
     def _prepare_data_get_reply_topic(self, raw_data: bytes) -> PreparedData:

@@ -311,6 +311,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     for device in api_client.devices.values():
         await device.async_restore_state()
+        stop_stream_watch = device.start_stream_watch(hass, api_client)
+        if stop_stream_watch is not None:
+            entry.async_on_unload(stop_stream_watch)
 
     # Forward entry setup to the platforms to set up the entities
     await hass.config_entries.async_forward_entry_setups(entry, _PLATFORMS)

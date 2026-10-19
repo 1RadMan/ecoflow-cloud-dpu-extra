@@ -2,8 +2,9 @@ import dataclasses
 import json
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
-from typing import Any, cast, override
+from collections.abc import Callable, Sequence
+from datetime import datetime, timedelta
+from typing import Any, ClassVar, cast, override
 
 from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.components.button import ButtonEntity
@@ -11,7 +12,8 @@ from homeassistant.components.number import NumberEntity
 from homeassistant.components.select import SelectEntity
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.components.switch import SwitchEntity
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt
 
 from custom_components.ecoflow_cloud.api import EcoflowApiClient
@@ -20,6 +22,13 @@ from custom_components.ecoflow_cloud.device_data import DeviceData
 from custom_components.ecoflow_cloud.devices.data_coordinator import DeviceDataCoordinator
 from custom_components.ecoflow_cloud.devices.data_holder import EcoflowDataHolder, PreparedData
 from custom_components.ecoflow_cloud.devices.status_tracker import StatusTracker
+from custom_components.ecoflow_cloud.devices.stream_watch import (
+    REPLY_EMPTY,
+    REPLY_FRESH,
+    REPLY_REPLAYED,
+    WATCH_TICK_SEC,
+    StreamWatch,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -57,6 +66,13 @@ class NoQuotaMessageError(Exception):
 
 
 class BaseDevice(ABC):
+    # Push-stream watchdog (see stream_watch.py), for devices that push every
+    # couple of seconds: seconds without a push before the stream counts as
+    # stalled (None = not watched), and whether to send get_quota_message()
+    # early while it is.
+    STREAM_STALL_SEC: ClassVar[float | None] = None
+    STREAM_REFRESH: ClassVar[bool] = False
+
     def __init__(self, device_info: EcoflowDeviceInfo, device_data: DeviceData):
         super().__init__()
         self.coordinator: DeviceDataCoordinator
@@ -75,9 +91,58 @@ class BaseDevice(ABC):
             self.device_data.options.diagnostic_mode,
             status_callback=self.status_tracker,
         )
+        self.stream_watch: StreamWatch | None = (
+            StreamWatch(device_info.sn, self.STREAM_STALL_SEC, self.STREAM_REFRESH)
+            if self.STREAM_STALL_SEC is not None
+            else None
+        )
 
     def configure(self, hass: HomeAssistant):
         self.coordinator = DeviceDataCoordinator(hass, self.data, self.device_data.options.refresh_period)
+
+    def start_stream_watch(self, hass: HomeAssistant, client: EcoflowApiClient) -> Callable[[], None] | None:
+        """Run the push-stream watchdog; returns its stop function (None if not watched)."""
+        watch = self.stream_watch
+        if watch is None:
+            return None
+        watch.reset(dt.utcnow())
+        name = self.device_data.display_name or self.device_data.name
+
+        @callback
+        def _tick(_now: datetime) -> None:
+            result = watch.tick(dt.utcnow())
+            mqtt = getattr(client, "mqtt_client", None)
+            # Not while disconnected: paho would queue every request and send them all on reconnect.
+            if result.refresh and mqtt is not None and mqtt.is_connected():
+                hass.async_create_background_task(
+                    client.quota_all(self.device_info.sn), f"ecoflow stream refresh {self.device_info.sn}"
+                )
+            for event, data in result.events:
+                hass.bus.async_fire(event, {**data, "name": name})
+            if result.changed:
+                watch.notify()
+
+        return async_track_time_interval(hass, _tick, timedelta(seconds=WATCH_TICK_SEC))
+
+    def _screen_reply(self, data: PreparedData) -> PreparedData:
+        """Classify a get_reply for the stream watch, and drop replayed state.
+
+        While pushes are stalled, a reply that changes none of the values we
+        already have is the device (or cloud) repeating a frozen snapshot: it
+        is kept for diagnostics but not merged, so it doesn't count as data.
+        """
+        watch = self.stream_watch
+        assert watch is not None
+        params = data.params.get("params") if data.params else None
+        if not params:
+            watch.on_reply(REPLY_EMPTY)
+            return data
+        current = self.data.params
+        if watch.push_stalled() and all(k in current and current[k] == v for k, v in params.items()):
+            watch.on_reply(REPLY_REPLAYED)
+            return PreparedData(data.online, None, data.raw_data, data.is_auto)
+        watch.on_reply(REPLY_FRESH)
+        return data
 
     @staticmethod
     def default_charging_power_step() -> int:
@@ -124,6 +189,8 @@ class BaseDevice(ABC):
         if data_type == self.device_info.data_topic:
             data = self._prepare_data_data_topic(raw_data)
             self.data.add_data(data)
+            if self.stream_watch is not None:
+                self.stream_watch.on_push()
         elif data_type == self.device_info.set_topic:
             data = self._prepare_data_set_topic(raw_data)
             self.data.add_set_message(data)
@@ -133,8 +200,12 @@ class BaseDevice(ABC):
         elif data_type == self.device_info.get_topic:
             data = self._prepare_data_get_topic(raw_data)
             self.data.add_get_message(data)
+            if self.stream_watch is not None:
+                self.stream_watch.on_request()
         elif data_type == self.device_info.get_reply_topic:
             data = self._prepare_data_get_reply_topic(raw_data)
+            if self.stream_watch is not None:
+                data = self._screen_reply(data)
             self.data.add_get_reply_message(data)
         elif data_type == self.device_info.status_topic:
             data = self._prepare_data_status_topic(raw_data)
