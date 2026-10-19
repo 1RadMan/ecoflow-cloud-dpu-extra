@@ -35,5 +35,9 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
             "set_status": [dict(sorted(k.items())) for k in device.data.set_status],
             "set_params": [dict(sorted(k.items())) for k in device.data.set_params],
         }
+        # Device-specific extras (e.g. the PowerPulse capture timeline).
+        extra = getattr(device, "diagnostics_extra", None)
+        if callable(extra):
+            value["extra"] = extra()
         values["EcoFlow"].append(value)
     return values
