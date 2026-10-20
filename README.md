@@ -67,10 +67,11 @@ The DELTA Pro Ultra X (app connection, device type `DELTA_PRO_ULTRA_X`) gets the
 
 | Sensor | What it shows |
 |---|---|
-| AC Port Voltage | Voltage at its AC port: about 241 V while it supplies the house, about 0 V while its output is off. Once the gateway has switched the backup side to the grid, it reads the grid voltage (about 245 V) instead. |
+| AC Port Voltage | Voltage at its AC port: about 241 V while it supplies the house, about 0 V while its output is off. Once the gateway has switched the backup side to the grid, it reads the grid voltage (about 245 V) instead. After a restart it's unknown until the DPU X next sends it: when it changes, or with its full report every 2 minutes. |
 | AC Output State | "Supplying" or "Not supplying". The raw value (2 or 1) is an attribute. |
 | Energy Backup State | 0 while supplying, 2 while not (the DPU X's own backup flag). |
-| AC Port Current | Disabled by default. Follows the load, but reads 15–40% above output power ÷ voltage and about 4 A even while idle on grid, so it isn't a measure of real power. |
+| AC Port Current | Disabled by default. Follows the load, but reads 15–40% above output power ÷ voltage and about 4 A even while idle on grid, so it isn't a measure of real power. Unknown after a restart until reported, like the voltage. |
+| Battery Pack States | Disabled by default. A state code for each installed pack, one digit per pack in bay order, such as `1111111111`. Sent whenever a pack's values change. What the codes mean isn't known yet (see below). |
 | Telemetry Stalled, Data Stale | See [telemetry stalls](#telemetry-stalls). |
 
 These were decoded from captures of a DPU X on a Smart Gateway through two unexplained drops of its output and a normal fallback to grid at the backup reserve. In all three, AC Output State and Energy Backup State changed within half a second of the voltage, and the error code stayed 0.
@@ -84,6 +85,7 @@ Other details:
 - **Temperatures** stay unknown until the DPU X reports them, instead of showing 0 °C (32 °F) after every restart. Most come in its runtime report, a few minutes apart. **PCS AC/DC Temperature** stay unknown: the DPU X sends both as 0 in every message.
 - **Firmware versions** show as a.b.c.d. PD and LLC arrive with the runtime report every few minutes. BMS and IoT have been 0 (not sent) in every capture so far, so they stay unknown.
 - **Per-leg voltages:** the existing AC Input L1 / L2 Voltage sensors (disabled by default) are the voltages on each leg at the DPU X's AC port, but only arrive about every 5 minutes. For anything faster, such as checking for a neutral shift, use the Smart Gateway's **Backup L1 / L2 Voltage** (disabled by default, every ~2 s) or the per-circuit voltages. AC Port Voltage is line to line.
+- **Battery Pack States** is the raw code the DPU X sends for each pack, recorded so it can be lined up with events. In captures, most packs show 1 while it supplies the house and some show 0, and a pack can switch between the two, at times every few seconds. When its output stopped, some packs went to 2 and the rest to 0, both with solar coming in (the fallback at the backup reserve) and with no input at all (the two unexplained drops), and all went back to 1 when it resumed. 0 idle, 1 discharging and 2 charging would fit most of this, but it isn't confirmed.
 - **No alarm or protection code** changed during the output drops: the error code stays 0. The inverter's status word (`inv_monitor_flag`) changed when the output stopped at the backup reserve, but it's only sent once a minute, so short drops don't show in it.
 
 ## Telemetry stalls

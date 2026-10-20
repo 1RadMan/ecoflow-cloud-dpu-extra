@@ -14,6 +14,7 @@ from custom_components.ecoflow_cloud.devices import const
 from custom_components.ecoflow_cloud.devices.internal.delta_pro_3 import DeltaPro3
 from custom_components.ecoflow_cloud.devices.internal.smart_home_panel_3 import (
     WIRE_F32,
+    WIRE_LEN,
     WIRE_VARINT,
     _first,
     _parse_fields,
@@ -60,6 +61,18 @@ F_AC_PORT_VOL = 120
 F_AC_PORT_AMP = 121
 F_AC_OUTPUT_STATE = 756
 AC_OUTPUT_STATES: dict[int, str] = {1: "Not supplying", 2: "Supplying"}
+
+# Per-pack array (field 786), sent whenever a pack's values change: each
+# entry's sub-field 2 is the bay, 3 a state code the proto doesn't name (0 when
+# absent). In captures: 1 on most packs while the DPU X supplies the house and
+# 0 on some, and a pack can switch between the two, at times every few
+# seconds. When its output stopped, some packs went to 2 and the rest to 0,
+# both with solar coming in (the fallback at the backup reserve) and with no
+# input at all (the two unexplained drops); all back to 1 when it resumed.
+# Possibly 0 idle, 1 discharging, 2 charging, but unconfirmed. Exposed raw, one
+# digit per populated bay in bay order, so its history can be lined up with
+# events.
+F_PACKS = 786
 
 
 class _PhaseWattsSensorEntity(InWattsSensorEntity):
@@ -114,6 +127,20 @@ class _ReportedTempSensorEntity(TempSensorEntity):
         return super()._update_value(val)
 
 
+class _ReportedVoltSensorEntity(VoltSensorEntity):
+    """Unknown until the DPU X reports a value, instead of 0 V after every
+    start (its AC port voltage only comes when it changes, or with the full
+    report every ~2 min)."""
+
+    _attr_default_value = None
+
+
+class _ReportedAmpSensorEntity(AmpSensorEntity):
+    """As _ReportedVoltSensorEntity, for the AC port current."""
+
+    _attr_default_value = None
+
+
 class _AcOutputStateEntity(MiscSensorEntity):
     """Field 756 as text ("Supplying" / "Not supplying"), raw value as an attribute."""
 
@@ -159,12 +186,14 @@ class DeltaProUltraX(DeltaPro3):
             # its AC port drops to ~0 and 756 / energy_backup_state flip when
             # its output stops, which the power sensors alone can't tell from
             # a quiet load.
-            VoltSensorEntity(client, self, "ac_port_vol", "AC Port Voltage", diagnostic=True),
+            _ReportedVoltSensorEntity(client, self, "ac_port_vol", "AC Port Voltage", diagnostic=True),
             _AcOutputStateEntity(client, self, "ac_output_state", "AC Output State").attr(
                 "ac_output_state", "raw_value", None
             ),
             MiscSensorEntity(client, self, "energy_backup_state", "Energy Backup State"),
-            AmpSensorEntity(client, self, "ac_port_amp", "AC Port Current", False, diagnostic=True),
+            _ReportedAmpSensorEntity(client, self, "ac_port_amp", "AC Port Current", False, diagnostic=True),
+            # Raw per-pack state codes, e.g. "1111111011" (see F_PACKS).
+            MiscSensorEntity(client, self, "bp_states", "Battery Pack States", False).with_icon("mdi:battery-sync"),
             # --- Detail (disabled by default) ---
             # Per-pack SoC (field 786), all 10 bays; unpopulated bays stay
             # unavailable.
@@ -271,6 +300,9 @@ class DeltaProUltraX(DeltaPro3):
             # AC port fields (see F_AC_PORT_VOL...): written only when present,
             # as incremental frames carry only what changed.
             fields = _parse_fields(pdata)
+            states = self._pack_states(fields)
+            if states:
+                result["bp_states"] = states
             for key, no, wire in (
                 ("ac_port_vol", F_AC_PORT_VOL, WIRE_F32),
                 ("ac_port_amp", F_AC_PORT_AMP, WIRE_F32),
@@ -280,3 +312,19 @@ class DeltaProUltraX(DeltaPro3):
                 if v is not None:
                     result[key] = round(v, 3) if wire == WIRE_F32 else v
         return result
+
+    @staticmethod
+    def _pack_states(fields: Any) -> str | None:
+        """Field 786's per-pack state codes, one digit per populated bay in bay order."""
+        block = _first(fields, F_PACKS, WIRE_LEN)
+        if block is None:
+            return None
+        packs: dict[int, int] = {}
+        for wire, entry in _parse_fields(block).get(1, []):
+            if wire != WIRE_LEN:
+                continue
+            pack = _parse_fields(entry)
+            bay = _first(pack, 2, WIRE_VARINT)
+            if bay:
+                packs[bay] = _first(pack, 3, WIRE_VARINT) or 0
+        return "".join(str(packs[b]) for b in sorted(packs)) if packs else None
