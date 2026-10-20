@@ -19,9 +19,19 @@ Usage::
     scripts/decode_capture.py capture.log --sn P101 --fields 4,6,120,756
     scripts/decode_capture.py capture.log --gaps 10          # push pauses > 10 s, get_reply repeats
     scripts/decode_capture.py capture.log --from 22:36:50 --to 22:37:30
+    scripts/decode_capture.py *.log --csv timeline.csv       # one CSV timeline for several captures
 
 Output values: varints as integers, 32-bit floats rounded to 3 places,
 nested messages as {sub-field: value}, strings when printable, else hex.
+
+CSV (--csv FILE, or - for stdout): one row per value, with nested messages
+flattened to paths ("1226.6" = field 1226, sub-field 6; "786.1[3].4" = the
+4th entry of 786.1, sub-field 4). Columns: file, time, serial, kind (push,
+get_reply, get, set, ...), src, dest, cmd, seq, field, value, note (a
+get_reply's snapshot hash, or EMPTY). Pushes give only the values that
+changed since that device's previous frame of the same cmd, unless --full;
+replies and commands give everything. --fields matches whole fields or paths
+(1226 or 1226.6).
 Field numbers are raw; see the device profiles under
 custom_components/ecoflow_cloud/devices/internal for their meanings.
 """
@@ -30,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import csv
 import hashlib
 import itertools
 import re
@@ -278,6 +289,67 @@ def print_frames(frames: list[Frame], args: argparse.Namespace) -> None:
             )
 
 
+def flatten(value: Any, prefix: str) -> dict[str, Any]:
+    """A rendered value as {path: leaf}: dicts by sub-field, lists by index."""
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            out.update(flatten(v, f"{prefix}.{k}"))
+        return out
+    if isinstance(value, list):
+        out = {}
+        for i, v in enumerate(value):
+            out.update(flatten(v, f"{prefix}[{i}]"))
+        return out
+    return {prefix: value}
+
+
+def _wanted(path: str, wanted: list[str] | None) -> bool:
+    return wanted is None or any(path == w or path.startswith((w + ".", w + "[")) for w in wanted)
+
+
+def write_csv(captures: list[tuple[str, list[Frame]]], args: argparse.Namespace) -> None:
+    wanted = args.fields.split(",") if args.fields else None
+    out = sys.stdout if args.csv == "-" else open(args.csv, "w", newline="", encoding="utf-8")  # noqa: SIM115
+    try:
+        w = csv.writer(out)
+        w.writerow(["file", "time", "serial", "kind", "src", "dest", "cmd", "seq", "field", "value", "note"])
+        for name, frames in captures:
+            last: dict[tuple[str, str], dict[str, Any]] = {}
+            for fr in frames:
+                if args.sn and not fr.sn.startswith(args.sn):
+                    continue
+                stamp = fr.time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                if not fr.headers:
+                    w.writerow([name, stamp, fr.sn, fr.kind, "", "", "", "", "", "", f"not a DP3 frame ({len(fr.raw)} bytes)"])
+                    continue
+                empty = fr.kind == "get_reply" and is_empty_reply(fr)
+                for h in fr.headers:
+                    fields, _ = parse(h.pdata) if h.pdata else ({}, True)
+                    flat: dict[str, Any] = {}
+                    for k, vals in sorted(fields.items()):
+                        flat.update(flatten(_render_list(vals, 0), str(k)))
+                    key = (fr.sn, h.cmd)
+                    if fr.kind == "push" and not args.full:
+                        prev = last.get(key, {})
+                        shown = {p: v for p, v in flat.items() if prev.get(p) != v}
+                    else:
+                        shown = flat
+                    if fr.kind == "push":
+                        last.setdefault(key, {}).update(flat)
+                    note = "EMPTY" if empty else ""
+                    if fr.kind == "get_reply" and h.cmd == "254/21" and h.pdata:
+                        note = f"snapshot {hashlib.sha1(h.pdata).hexdigest()[:10]}"
+                    rows = [(p, v) for p, v in shown.items() if _wanted(p, wanted)]
+                    if not rows and (empty or (fr.kind != "push" and wanted is None)):
+                        rows = [("", "")]  # keep requests and empty replies on the timeline
+                    for p, v in rows:
+                        w.writerow([name, stamp, fr.sn, fr.kind, h.src, h.dest, h.cmd, h.seq, p, v, note])
+    finally:
+        if out is not sys.stdout:
+            out.close()
+
+
 def print_gaps(frames: list[Frame], requests: list[datetime], threshold: float) -> None:
     """Push pauses per device, plus get_replies that repeat the previous snapshot."""
     by_sn: dict[str, list[Frame]] = {}
@@ -311,24 +383,34 @@ def print_gaps(frames: list[Frame], requests: list[datetime], threshold: float) 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("capture")
+    ap.add_argument("capture", nargs="+", help="one or more capture/log files")
     ap.add_argument("--sn", help="only frames for serials starting with this")
     ap.add_argument("--fields", help="comma-separated payload field numbers to show")
     ap.add_argument("--full", action="store_true", help="all fields of every push, not just the changed ones")
     ap.add_argument("--gaps", type=float, metavar="SEC", help="report push pauses longer than SEC and snapshot repeats")
     ap.add_argument("--from", dest="since", help="HH:MM:SS start")
     ap.add_argument("--to", dest="until", help="HH:MM:SS end")
+    ap.add_argument("--csv", metavar="FILE", help="write a CSV timeline to FILE (- for stdout)")
     args = ap.parse_args(argv)
 
-    frames, requests = read_capture(args.capture)
-    if args.since:
-        frames = [f for f in frames if _t(f.time) >= args.since]
-    if args.until:
-        frames = [f for f in frames if _t(f.time) <= args.until]
-    if args.gaps is not None:
-        print_gaps(frames, requests, args.gaps)
-    else:
-        print_frames(frames, args)
+    captures: list[tuple[str, list[Frame], list[datetime]]] = []
+    for path in args.capture:
+        frames, requests = read_capture(path)
+        if args.since:
+            frames = [f for f in frames if _t(f.time) >= args.since]
+        if args.until:
+            frames = [f for f in frames if _t(f.time) <= args.until]
+        captures.append((path.replace("\\", "/").rsplit("/", 1)[-1], frames, requests))
+    if args.csv:
+        write_csv([(name, frames) for name, frames, _ in captures], args)
+        return 0
+    for name, frames, requests in captures:
+        if len(captures) > 1:
+            print(f"### {name}")
+        if args.gaps is not None:
+            print_gaps(frames, requests, args.gaps)
+        else:
+            print_frames(frames, args)
     return 0
 
 

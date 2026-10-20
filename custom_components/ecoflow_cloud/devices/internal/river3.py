@@ -9,12 +9,16 @@ from custom_components.ecoflow_cloud.api.message import PrivateAPIMessageProtoco
 import base64
 import logging
 import time
+from collections.abc import Sequence
 from typing import Any, override
+
+from homeassistant.components.binary_sensor import BinarySensorEntity
 
 from google.protobuf.json_format import MessageToDict
 from homeassistant.helpers.entity import EntityCategory  # pyright: ignore[reportMissingImports]
 
 from custom_components.ecoflow_cloud.api import EcoflowApiClient
+from custom_components.ecoflow_cloud.binary_sensor import stream_watch_binary_sensors
 from custom_components.ecoflow_cloud.devices import BaseInternalDevice, const
 from custom_components.ecoflow_cloud.devices.internal.proto import (
     ef_river3_pb2 as ef_river3_pb2,
@@ -236,7 +240,16 @@ class River3PlusChargingPowerEntity(ChargingPowerEntity):
 
 
 class River3(BaseInternalDevice):
-    """EcoFlow River 3 device implementation using protobuf decoding."""
+    """EcoFlow River 3 device implementation using protobuf decoding.
+
+    Push stream watched (see stream_watch.py): the River 3 pushes its display
+    upload every ~2 s on its own, so a 15 s gap shows as "Telemetry Stalled",
+    and it is asked for a snapshot early while the gap lasts (it answers
+    get_quota_message).
+    """
+
+    STREAM_STALL_SEC = 15.0
+    STREAM_REFRESH = True
 
     @staticmethod
     def default_charging_power_step() -> int:
@@ -555,6 +568,10 @@ class River3(BaseInternalDevice):
             return super()._prepare_data(raw_data)
         _LOGGER.debug("[River3] Ignoring protobuf message with no decodable payload")
         return {}
+
+    @override
+    def binary_sensors(self, client: EcoflowApiClient) -> Sequence[BinarySensorEntity]:
+        return stream_watch_binary_sensors(client, self)
 
     @override
     def get_quota_message(self) -> River3CommandMessage:

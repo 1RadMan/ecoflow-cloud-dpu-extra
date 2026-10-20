@@ -150,7 +150,10 @@ and equal to its last push), and twice with no payload. Those replies are no
 longer merged as fresh data; "Telemetry Stalled" / "Data Stale" show the gap,
 and the gateway is asked again every few seconds while it lasts.
 
-Firmware: field 176 of 254/22 (pd_firm_ver), four bytes, shown as a.b.c.d.
+Firmware: field 176 of 254/22 (pd_firm_ver in the DP3 proto), four bytes,
+shown as a.b.c.d (2.0.2.129 on the captured gateway). It is not the system
+version the EcoFlow app shows (V7.0.1.95 on the same gateway), which no frame
+carries; nor do the frames carry a restart counter, uptime or boot time.
 
 The frames also carry the site's configured location (fields 1236/1238/1240);
 it is deliberately never surfaced.
@@ -198,6 +201,7 @@ from custom_components.ecoflow_cloud.number import ValueUpdateEntity
 from custom_components.ecoflow_cloud.select import DictSelectEntity
 from custom_components.ecoflow_cloud.sensor import (
     BatteryLimitSensorEntity,
+    FirmwareVersionSensorEntity,
     InAmpSensorEntity,
     InVoltSensorEntity,
     InWattsSensorEntity,
@@ -732,16 +736,6 @@ class _ReportingIntervalSensorEntity(BaseSensorEntity):
         return super()._update_value(round(int(val) / 1000, 1))
 
 
-class _FirmwareVersionSensorEntity(MiscSensorEntity):
-    """Four-byte version number shown as a.b.c.d."""
-
-    _attr_icon = "mdi:chip"
-
-    def _update_value(self, val: Any) -> bool:
-        v = int(val)
-        return super()._update_value(".".join(str((v >> shift) & 0xFF) for shift in (24, 16, 8, 0)))
-
-
 class SmartGateway(SmartHomePanel3):
     """EcoFlow Smart Gateway (HR65…, private / app API)."""
 
@@ -963,7 +957,10 @@ class SmartGateway(SmartHomePanel3):
             _ReportingIntervalSensorEntity(
                 client, self, "display_property_incremental_upload_period", "Reporting Interval"
             ),
-            _FirmwareVersionSensorEntity(client, self, "pd_firm_ver", "Firmware Version").attr(
+            # The DP3 runtime upload's PD firmware field. Not the system
+            # version the EcoFlow app shows for the gateway (e.g. V7.0.1.95),
+            # which isn't sent over MQTT.
+            FirmwareVersionSensorEntity(client, self, "pd_firm_ver", "PD Firmware Version").attr(
                 "pd_firm_ver", "raw_value", None
             ),
         ]

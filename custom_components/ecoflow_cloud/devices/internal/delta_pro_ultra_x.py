@@ -24,6 +24,7 @@ from custom_components.ecoflow_cloud.devices.internal.proto import (
 from custom_components.ecoflow_cloud.sensor import (
     AmpSensorEntity,
     BatteryLimitSensorEntity,
+    FirmwareVersionSensorEntity,
     FrequencySensorEntity,
     InRawVoltSolarSensorEntity,
     InWattsSensorEntity,
@@ -93,6 +94,24 @@ class _ChargingStateTextEntity(MiscSensorEntity):
 
     def _update_value(self, val: Any) -> bool:
         return super()._update_value(self._LABELS.get(int(val), "Unknown"))
+
+
+class _ReportedTempSensorEntity(TempSensorEntity):
+    """Unknown until the DPU X reports a value, instead of 0 °C (32 °F) after
+    every start: most temperatures only come in the runtime upload, a few
+    minutes apart. With zero_unreported, 0 also counts as not reported: the
+    DPU X sends its PCS AC/DC temperatures as 0 in every frame."""
+
+    _attr_native_value = None  # type: ignore[assignment]  # TempSensorEntity starts at 0
+
+    def __init__(self, *args: Any, zero_unreported: bool = False, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._zero_unreported = zero_unreported
+
+    def _update_value(self, val: Any) -> bool:
+        if self._zero_unreported and val == 0:
+            return False
+        return super()._update_value(val)
 
 
 class _AcOutputStateEntity(MiscSensorEntity):
@@ -177,15 +196,15 @@ class DeltaProUltraX(DeltaPro3):
             BatteryLimitSensorEntity(client, self, "cms_max_chg_soc", const.MAX_CHARGE_LEVEL, False),
             BatteryLimitSensorEntity(client, self, "cms_min_dsg_soc", const.MIN_DISCHARGE_LEVEL, False),
             *[
-                TempSensorEntity(client, self, f"bp_{n}_temp", const.BATTERY_N_TEMP % n, False)
+                _ReportedTempSensorEntity(client, self, f"bp_{n}_temp", const.BATTERY_N_TEMP % n, False)
                 for n in range(1, MAX_PACKS + 1)
             ],
             # Inverter / LLC / PCS temperatures.
-            TempSensorEntity(client, self, "inv_ntc_temp2", "Inverter Temperature 2", False),
-            TempSensorEntity(client, self, "inv_ntc_temp3", "Inverter Temperature 3", False),
-            TempSensorEntity(client, self, "llc_ntc_temp", "LLC Temperature", False),
-            TempSensorEntity(client, self, "temp_pcs_ac", "PCS AC Temperature", False),
-            TempSensorEntity(client, self, "temp_pcs_dc", "PCS DC Temperature", False),
+            _ReportedTempSensorEntity(client, self, "inv_ntc_temp2", "Inverter Temperature 2", False),
+            _ReportedTempSensorEntity(client, self, "inv_ntc_temp3", "Inverter Temperature 3", False),
+            _ReportedTempSensorEntity(client, self, "llc_ntc_temp", "LLC Temperature", False),
+            _ReportedTempSensorEntity(client, self, "temp_pcs_ac", "PCS AC Temperature", False, zero_unreported=True),
+            _ReportedTempSensorEntity(client, self, "temp_pcs_dc", "PCS DC Temperature", False, zero_unreported=True),
             # Power conversion bus metrics.
             VoltSensorEntity(client, self, "llc_bat_vol", "Battery Bus Voltage", False),
             AmpSensorEntity(client, self, "llc_bat_cur", "Battery Bus Current", False),
@@ -201,11 +220,13 @@ class DeltaProUltraX(DeltaPro3):
             # MPPT pause-event counters.
             MiscSensorEntity(client, self, "pv_pause_cnt", "Solar 1 MPPT Pause Count", False),
             MiscSensorEntity(client, self, "pv2_pause_cnt", "Solar 2 MPPT Pause Count", False),
-            # Firmware / hardware versions (diagnostic).
-            MiscSensorEntity(client, self, "bms_firm_ver", "BMS Firmware Version", False),
-            MiscSensorEntity(client, self, "pd_firm_ver", "PD Firmware Version", False),
-            MiscSensorEntity(client, self, "llc_firm_ver", "LLC Firmware Version", False),
-            MiscSensorEntity(client, self, "iot_firm_ver", "IoT Firmware Version", False),
+            # Firmware / hardware versions (diagnostic), as a.b.c.d. PD and LLC
+            # come in the full runtime upload (every ~5 min); BMS and IoT have
+            # been 0 (not reported) in every capture so far, so they stay unknown.
+            FirmwareVersionSensorEntity(client, self, "bms_firm_ver", "BMS Firmware Version", False),
+            FirmwareVersionSensorEntity(client, self, "pd_firm_ver", "PD Firmware Version", False),
+            FirmwareVersionSensorEntity(client, self, "llc_firm_ver", "LLC Firmware Version", False),
+            FirmwareVersionSensorEntity(client, self, "iot_firm_ver", "IoT Firmware Version", False),
             MiscSensorEntity(client, self, "mppt_hardware_ver", "MPPT Hardware Version", False),
             # Error codes (diagnostic).
             MiscSensorEntity(client, self, "errcode", "Error Code", False),

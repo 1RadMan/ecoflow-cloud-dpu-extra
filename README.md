@@ -6,7 +6,7 @@ This fork of [tolwi/hassio-ecoflow-cloud](https://github.com/tolwi/hassio-ecoflo
 - **[Per-battery sensors](#delta-pro-ultra-per-battery-sensors) for the EcoFlow DELTA Pro Ultra** (developer API connection). Submitted upstream as [pull request #927](https://github.com/tolwi/hassio-ecoflow-cloud/pull/927).
 - **[River 3 and River 3 Plus](#river-3-and-river-3-plus) fixes:** battery level, settings and switches now fill in, and a River 3 Plus is recognized automatically, with its own charging range and LED control.
 - **[PowerPulse EV Charger](#powerpulse-ev-charger) support:** state, faults, energy, and start/stop, mode and current controls.
-- **[DELTA Pro Ultra X](#delta-pro-ultra-x) output sensors**, and **[stall detection](#telemetry-stalls-smart-gateway-and-delta-pro-ultra-x)** for the gateway's and the DPU X's live data, which can freeze without any sign in Home Assistant.
+- **[DELTA Pro Ultra X](#delta-pro-ultra-x) output sensors**, and **[stall detection](#telemetry-stalls)** for the live data of the gateway, the DPU X and the River 3, which can freeze without any sign in Home Assistant.
 - **[Fewer recorder writes](#fewer-recorder-writes)** from power, remaining-time and energy sensors, for every device.
 - **[A capture decoder](#decoding-a-debug-capture)** that turns a DEBUG log into readable frames, for diagnosing devices.
 
@@ -32,9 +32,9 @@ The gateway is only reachable through EcoFlow's app connection, not the develope
 - Combined battery level, backup reserve, charge / discharge time remaining
 - Per smart circuit: power (with kWh), voltage and current, named after the circuit labels set in the EcoFlow app. 240V circuits appear once, with both legs combined. Pairing or splitting circuits in the app is picked up automatically.
 - **S.I.B. AC1–AC3 Activity:** what each Smart Inlet Box port is doing: Off, Idle, Supplying home or Grid charging (another value shows as "Unknown (n)").
-- **Reporting Interval** (diagnostic): how often the gateway is pushing updates, normally 2 s. See [telemetry stalls](#telemetry-stalls-smart-gateway-and-delta-pro-ultra-x).
-- **Firmware Version** (diagnostic).
-- **Telemetry Stalled** and **Data Stale** (diagnostic): see [telemetry stalls](#telemetry-stalls-smart-gateway-and-delta-pro-ultra-x).
+- **Reporting Interval** (diagnostic): how often the gateway is pushing updates, normally 2 s. See [telemetry stalls](#telemetry-stalls).
+- **PD Firmware Version** (diagnostic): the firmware version the gateway sends (2.0.2.129 in testing). It isn't the system version the EcoFlow app shows for the gateway (V7.0.1.95 on the same unit), which the gateway doesn't send to Home Assistant.
+- **Telemetry Stalled** and **Data Stale** (diagnostic): see [telemetry stalls](#telemetry-stalls).
 
 ### Controls
 
@@ -71,24 +71,31 @@ The DELTA Pro Ultra X (app connection, device type `DELTA_PRO_ULTRA_X`) gets the
 | AC Output State | "Supplying" or "Not supplying". The raw value (2 or 1) is an attribute. |
 | Energy Backup State | 0 while supplying, 2 while not (the DPU X's own backup flag). |
 | AC Port Current | Disabled by default. Follows the load, but reads 15–40% above output power ÷ voltage and about 4 A even while idle on grid, so it isn't a measure of real power. |
-| Telemetry Stalled, Data Stale | See below. |
+| Telemetry Stalled, Data Stale | See [telemetry stalls](#telemetry-stalls). |
 
 These were decoded from captures of a DPU X on a Smart Gateway through two unexplained drops of its output and a normal fallback to grid at the backup reserve. In all three, AC Output State and Energy Backup State changed within half a second of the voltage, and the error code stayed 0.
 
 An automation can flag a drop with a trigger on **AC Output State** changing to "Not supplying" (or **AC Port Voltage** below 50 V), with conditions that the gateway is in Self-Powered mode and the battery is above the backup reserve.
 
-The DPU X also sends two or three messages bundled together about once a minute. The integration used to read only the first, so some updates, including the per-leg output power, were dropped. All of them are read now.
+The DPU X also sends two or three messages bundled together about once a minute. The integration used to read only the first, so some updates, including the per-leg output power and the firmware versions, were dropped. All of them are read now.
 
-## Telemetry stalls (Smart Gateway and DELTA Pro Ultra X)
+Other details:
 
-The Smart Gateway and the DPU X push an update about every 2 seconds. Captures from a gateway showed it going silent for 28 seconds to 4.4 minutes. During the long silence, its replies to the integration's 30-second refresh kept arriving but carried a frozen copy of its last update, and two came back empty. Home Assistant kept showing the frozen values, with the device online, for the whole time.
+- **Temperatures** stay unknown until the DPU X reports them, instead of showing 0 °C (32 °F) after every restart. Most come in its runtime report, a few minutes apart. **PCS AC/DC Temperature** stay unknown: the DPU X sends both as 0 in every message.
+- **Firmware versions** show as a.b.c.d. PD and LLC arrive with the runtime report every few minutes. BMS and IoT have been 0 (not sent) in every capture so far, so they stay unknown.
+- **Per-leg voltages:** the existing AC Input L1 / L2 Voltage sensors (disabled by default) are the voltages on each leg at the DPU X's AC port, but only arrive about every 5 minutes. For anything faster, such as checking for a neutral shift, use the Smart Gateway's **Backup L1 / L2 Voltage** (disabled by default, every ~2 s) or the per-circuit voltages. AC Port Voltage is line to line.
+- **No alarm or protection code** changed during the output drops: the error code stays 0. The inverter's status word (`inv_monitor_flag`) changed when the output stopped at the backup reserve, but it's only sent once a minute, so short drops don't show in it.
 
-Both devices now have two diagnostic binary sensors:
+## Telemetry stalls
+
+The Smart Gateway, the DPU X and the River 3 push an update about every 2 seconds. Captures from a gateway showed it going silent for 28 seconds to 4.4 minutes. During the long silence, its replies to the integration's 30-second refresh kept arriving but carried a frozen copy of its last update, and two came back empty. Home Assistant kept showing the frozen values, with the device online, for the whole time.
+
+All three now have two diagnostic binary sensors:
 
 - **Telemetry Stalled** turns on after 15 seconds without an update. Its attributes show when the stall started, the last stall's length, and what the refreshes got back.
 - **Data Stale** turns on while stalled and nothing new has arrived for 15 seconds. A refresh reply that only repeats values already known is no longer treated as new data.
 
-For the gateway, the integration also asks for a fresh snapshot 10 seconds into a stall and then every 5 seconds for up to 3 minutes, instead of waiting for the next 30-second refresh. If the gateway reports that it has dropped to its slow update rate (a **Reporting Interval** above 2 s, seen after it reconnects to EcoFlow's cloud), it asks straight away, which puts it back on 2-second updates.
+For the gateway and the River 3, the integration also asks for a fresh snapshot 10 seconds into a stall and then every 5 seconds for up to 3 minutes, instead of waiting for the next 30-second refresh. If the gateway reports that it has dropped to its slow update rate (a **Reporting Interval** above 2 s, seen after it reconnects to EcoFlow's cloud), it asks straight away, which puts it back on 2-second updates.
 
 Each stall fires the Home Assistant events `ecoflow_cloud_stream_stalled` and `ecoflow_cloud_stream_resumed` (with the serial, name, start time, duration and refresh counts), for automations or the logbook.
 
@@ -192,6 +199,7 @@ The AC charging slider moves in 50 W steps, the River 3 default. For finer contr
 - Tested on one River 3 Plus (US model, no extra battery, firmware as of October 2026). The status fix should apply to every River 3 model (it uses the same request as the DELTA 3), but hasn't been tested on a base River 3. On a base River 3, AC In Volts, the PCS temperatures and State of Health may have the same stale-data problem as on the Plus; please open an issue with a diagnostics download if you can check.
 - Extra batteries (EB300 / EB600) aren't shown separately.
 - Settings changed in the EcoFlow app show up in Home Assistant within seconds.
+- **Telemetry Stalled** and **Data Stale** work as for the Smart Gateway; see [telemetry stalls](#telemetry-stalls).
 
 ## Fewer recorder writes
 
@@ -205,14 +213,19 @@ Graphs, 5-minute statistics and energy totals stay accurate (within a few Wh a d
 
 ## Decoding a debug capture
 
-`scripts/decode_capture.py` reads a Home Assistant log with DEBUG enabled for `custom_components.ecoflow_cloud.api.ecoflow_mqtt` and decodes every EcoFlow message in it: each header (source, destination, command, sequence) and the payload's fields by number. It needs only Python 3.10 or later, not Home Assistant.
+`scripts/decode_capture.py` reads a Home Assistant log with DEBUG enabled for `custom_components.ecoflow_cloud.api.ecoflow_mqtt` (a whole log, or slices of it) and decodes every EcoFlow message in it: each header (source, destination, command, sequence) and the payload's fields by number. It needs only Python 3.10 or later, not Home Assistant.
+
+HACS installs only the integration, so download the script from this repository ([raw file](https://raw.githubusercontent.com/1RadMan/ecoflow-cloud-dpu-extra/main/scripts/decode_capture.py)) and run it on any computer with Python 3.
 
 ```
 python3 scripts/decode_capture.py home-assistant.log                               # every frame, changed fields only
 python3 scripts/decode_capture.py home-assistant.log --sn P101 --fields 4,6,120,756 # chosen fields of one device
 python3 scripts/decode_capture.py home-assistant.log --gaps 10                      # update pauses over 10 s, repeated snapshots
 python3 scripts/decode_capture.py home-assistant.log --from 22:36:50 --to 22:37:30
+python3 scripts/decode_capture.py capture1.log capture2.log --csv timeline.csv     # a CSV timeline of several captures
 ```
+
+The CSV has one row per value: file, time, serial, message kind, header (src, dest, cmd, seq), field and value, plus a note for "get all" replies (a snapshot ID, or EMPTY). Nested values get their own rows, e.g. `1226.6` for the gateway's AC3 port activity, and `--fields` can pick them (`--fields 1226.6`). For live updates it lists only the values that changed; add `--full` for every value of every message.
 
 To enable the DEBUG log, add this to `configuration.yaml` and restart:
 

@@ -134,6 +134,18 @@ class MiscSensorEntity(BaseSensorEntity):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
 
+class FirmwareVersionSensorEntity(MiscSensorEntity):
+    """A four-byte version number shown as a.b.c.d; 0 (not reported) stays unknown."""
+
+    _attr_icon = "mdi:chip"
+
+    def _update_value(self, val: Any) -> bool:
+        v = int(val)
+        if v == 0:
+            return False
+        return super()._update_value(".".join(str((v >> shift) & 0xFF) for shift in (24, 16, 8, 0)))
+
+
 class DcModeStateSensorEntity(MiscSensorEntity):
     """Expose the live DC input mode without duplicating the config select."""
 
