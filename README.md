@@ -75,7 +75,7 @@ The DELTA Pro Ultra X (app connection, device type `DELTA_PRO_ULTRA_X`) gets the
 
 These were decoded from captures of a DPU X on a Smart Gateway through two unexplained drops of its output and a normal fallback to grid at the backup reserve. In all three, AC Output State and Energy Backup State changed within half a second of the voltage, and the error code stayed 0.
 
-An automation can flag a drop with a trigger on **AC Output State** changing to "Not supplying" (or **AC Port Voltage** below 50 V), with conditions that the gateway is in Self-Powered mode and the battery is above the backup reserve.
+An automation can flag a drop with a trigger on **AC Port Voltage** falling below 50 V, with **AC Output State** = "Not supplying" as confirmation, and conditions that the gateway is in Self-Powered mode and the battery is above the backup reserve. The voltage is the faster signal: when the gateway switched the port off in a test, AC Output State changed 18 seconds after the voltage dropped.
 
 The DPU X also sends two or three messages bundled together about once a minute. The integration used to read only the first, so some updates, including the per-leg output power and the firmware versions, were dropped. All of them are read now.
 
