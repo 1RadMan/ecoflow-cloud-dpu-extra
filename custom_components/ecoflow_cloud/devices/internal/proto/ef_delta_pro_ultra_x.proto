@@ -6,8 +6,8 @@ syntax = "proto3";
 
 message DPUXPack {
   optional uint32 bay = 2;     // bay index 1..10; absent on empty slots
-  // 3: a state code, 0/1/2 (not defined here: read raw, see F_PACKS in
-  // delta_pro_ultra_x.py)
+  // 3: pack state, 0 idle / 1 discharging / 2 charging (not defined here:
+  // read raw, see F_PACKS in delta_pro_ultra_x.py)
   optional uint32 soc = 4;     // % state of charge
   optional float amp = 5;      // 6.14 on every pack in every capture so far (kWh capacity?)
   optional float design = 6;   // ~6140 constant, present on every slot

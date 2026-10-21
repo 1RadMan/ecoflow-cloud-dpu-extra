@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, override
 
 from homeassistant.components.binary_sensor import BinarySensorEntity
@@ -54,25 +54,27 @@ MAX_PACKS = 10
 #   121  AC port current, A (F32): follows the load, but runs 15-40% above
 #        output power / voltage and reads ~4.4 A while idle on grid, so it is
 #        not a measure of real power.
-#   756  2 while the DPU X supplies the house, 1 while it doesn't (both in
-#        those drops and when on grid); flips with energy_backup_state (field
-#        6: 0 supplying / 2 not), within ~0.3 s.
+#   756  2 while the DPU X supplies the house from its batteries, 1 otherwise:
+#        in those drops and when on grid, but also during solar surplus,
+#        while it supplies the house at ~241 V from solar alone (seen on the
+#        same DPU X since). So it seems to follow battery discharge, not the
+#        AC output; the port voltage is the reliable sign of the output.
+#        Flipped with energy_backup_state (field 6: 0 / 2) within ~0.3 s in
+#        the drops.
 F_AC_PORT_VOL = 120
 F_AC_PORT_AMP = 121
 F_AC_OUTPUT_STATE = 756
 AC_OUTPUT_STATES: dict[int, str] = {1: "Not supplying", 2: "Supplying"}
 
 # Per-pack array (field 786), sent whenever a pack's values change: each
-# entry's sub-field 2 is the bay, 3 a state code the proto doesn't name (0 when
-# absent). In captures: 1 on most packs while the DPU X supplies the house and
-# 0 on some, and a pack can switch between the two, at times every few
-# seconds. When its output stopped, some packs went to 2 and the rest to 0,
-# both with solar coming in (the fallback at the backup reserve) and with no
-# input at all (the two unexplained drops); all back to 1 when it resumed.
-# Possibly 0 idle, 1 discharging, 2 charging, but unconfirmed. Exposed raw, one
-# digit per populated bay in bay order, so its history can be lined up with
-# events.
+# entry's sub-field 2 is the bay, 3 the pack's state (0 when absent), which the
+# proto doesn't name. Confirmed on a 10-pack DPU X: 1 = discharging, 0 = idle
+# (it draws from the fuller packs first), 2 = charging (from solar, emptiest
+# packs first, or from fuller packs while it balances them, which it also does
+# while supplying the house). Exposed as one digit per populated bay in bay
+# order, with each pack's state spelled out as an attribute.
 F_PACKS = 786
+PACK_STATES: dict[int, str] = {0: "Idle", 1: "Discharging", 2: "Charging"}
 
 
 class _PhaseWattsSensorEntity(InWattsSensorEntity):
@@ -141,6 +143,23 @@ class _ReportedAmpSensorEntity(AmpSensorEntity):
     _attr_default_value = None
 
 
+class _PackStatesEntity(MiscSensorEntity):
+    """Per-pack states (field 786) as digits in bay order, e.g. "1111122022",
+    with each populated bay's state spelled out as a battery_<bay> attribute."""
+
+    _attr_icon = "mdi:battery-sync"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        for n in range(1, MAX_PACKS + 1):
+            self.attr(f"bp_{n}_state", f"battery_{n}", None)
+
+    @property
+    def extra_state_attributes(self) -> Mapping[str, Any] | None:
+        attrs = super().extra_state_attributes or {}
+        return {k: PACK_STATES.get(v, f"Unknown ({v})") for k, v in attrs.items() if v is not None}
+
+
 class _AcOutputStateEntity(MiscSensorEntity):
     """Field 756 as text ("Supplying" / "Not supplying"), raw value as an attribute."""
 
@@ -192,8 +211,8 @@ class DeltaProUltraX(DeltaPro3):
             ),
             MiscSensorEntity(client, self, "energy_backup_state", "Energy Backup State"),
             _ReportedAmpSensorEntity(client, self, "ac_port_amp", "AC Port Current", False, diagnostic=True),
-            # Raw per-pack state codes, e.g. "1111111011" (see F_PACKS).
-            MiscSensorEntity(client, self, "bp_states", "Battery Pack States", False).with_icon("mdi:battery-sync"),
+            # Per-pack states, e.g. "1111122022", plus battery_<bay> attributes (see F_PACKS).
+            _PackStatesEntity(client, self, "bp_states", "Battery Pack States", False),
             # --- Detail (disabled by default) ---
             # Per-pack SoC (field 786), all 10 bays; unpopulated bays stay
             # unavailable.
@@ -302,7 +321,9 @@ class DeltaProUltraX(DeltaPro3):
             fields = _parse_fields(pdata)
             states = self._pack_states(fields)
             if states:
-                result["bp_states"] = states
+                result["bp_states"] = "".join(str(states[bay]) for bay in sorted(states))
+                for bay, state in states.items():
+                    result[f"bp_{bay}_state"] = state
             for key, no, wire in (
                 ("ac_port_vol", F_AC_PORT_VOL, WIRE_F32),
                 ("ac_port_amp", F_AC_PORT_AMP, WIRE_F32),
@@ -314,11 +335,11 @@ class DeltaProUltraX(DeltaPro3):
         return result
 
     @staticmethod
-    def _pack_states(fields: Any) -> str | None:
-        """Field 786's per-pack state codes, one digit per populated bay in bay order."""
+    def _pack_states(fields: Any) -> dict[int, int]:
+        """Field 786's per-pack states, {bay: state}, for the populated bays."""
         block = _first(fields, F_PACKS, WIRE_LEN)
         if block is None:
-            return None
+            return {}
         packs: dict[int, int] = {}
         for wire, entry in _parse_fields(block).get(1, []):
             if wire != WIRE_LEN:
@@ -327,4 +348,4 @@ class DeltaProUltraX(DeltaPro3):
             bay = _first(pack, 2, WIRE_VARINT)
             if bay:
                 packs[bay] = _first(pack, 3, WIRE_VARINT) or 0
-        return "".join(str(packs[b]) for b in sorted(packs)) if packs else None
+        return packs
