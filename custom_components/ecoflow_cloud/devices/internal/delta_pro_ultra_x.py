@@ -64,7 +64,7 @@ MAX_PACKS = 10
 F_AC_PORT_VOL = 120
 F_AC_PORT_AMP = 121
 F_AC_OUTPUT_STATE = 756
-AC_OUTPUT_STATES: dict[int, str] = {1: "Not supplying", 2: "Supplying"}
+AC_OUTPUT_STATES: dict[int, str] = {1: "Not discharging", 2: "Discharging"}
 
 # Per-pack array (field 786), sent whenever a pack's values change: each
 # entry's sub-field 2 is the bay, 3 the pack's state (0 when absent), which the
@@ -161,7 +161,7 @@ class _PackStatesEntity(MiscSensorEntity):
 
 
 class _AcOutputStateEntity(MiscSensorEntity):
-    """Field 756 as text ("Supplying" / "Not supplying"), raw value as an attribute."""
+    """Field 756 as text ("Discharging" / "Not discharging"), raw value as an attribute."""
 
     def _update_value(self, val: Any) -> bool:
         return super()._update_value(AC_OUTPUT_STATES.get(int(val), f"Unknown ({int(val)})"))
