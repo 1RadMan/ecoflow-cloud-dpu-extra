@@ -54,17 +54,17 @@ MAX_PACKS = 10
 #   121  AC port current, A (F32): follows the load, but runs 15-40% above
 #        output power / voltage and reads ~4.4 A while idle on grid, so it is
 #        not a measure of real power.
-#   756  2 while the DPU X supplies the house from its batteries, 1 otherwise:
-#        in those drops and when on grid, but also during solar surplus,
-#        while it supplies the house at ~241 V from solar alone (seen on the
-#        same DPU X since). So it seems to follow battery discharge, not the
-#        AC output; the port voltage is the reliable sign of the output.
-#        Flipped with energy_backup_state (field 6: 0 / 2) within ~0.3 s in
-#        the drops.
+#   756  battery calibration, started from the DPU X's battery menu in the
+#        app: 0 while none is running, 1 or 2 while one is. It has no off
+#        switch and runs until the packs reach 100%. While it ran, 2 mostly
+#        coincided with the batteries discharging and 1 with not, but not
+#        always (2 once while idle). Field 6 (energy_backup_state) changed
+#        with it each time one started or finished. Neither is a sign of the
+#        AC output; their flips during the drops were the effect.
 F_AC_PORT_VOL = 120
 F_AC_PORT_AMP = 121
-F_AC_OUTPUT_STATE = 756
-AC_OUTPUT_STATES: dict[int, str] = {1: "Not discharging", 2: "Discharging"}
+F_CALIBRATION = 756
+CALIBRATION_STATES: dict[int, str] = {0: "Off", 1: "On", 2: "On"}
 
 # Per-pack array (field 786), sent whenever a pack's values change: each
 # entry's sub-field 2 is the bay, 3 the pack's state (0 when absent), which the
@@ -173,11 +173,11 @@ class _PackStatesEntity(MiscSensorEntity):
         return {k: PACK_STATES.get(v, f"Unknown ({v})") for k, v in attrs.items() if v is not None}
 
 
-class _AcOutputStateEntity(MiscSensorEntity):
-    """Field 756 as text ("Discharging" / "Not discharging"), raw value as an attribute."""
+class _CalibrationEntity(MiscSensorEntity):
+    """Field 756 as "Off" / "On" (see F_CALIBRATION), raw value as an attribute."""
 
     def _update_value(self, val: Any) -> bool:
-        return super()._update_value(AC_OUTPUT_STATES.get(int(val), f"Unknown ({int(val)})"))
+        return super()._update_value(CALIBRATION_STATES.get(int(val), f"Unknown ({int(val)})"))
 
 
 class DeltaProUltraX(DeltaPro3):
@@ -215,11 +215,12 @@ class DeltaProUltraX(DeltaPro3):
             QuotaStatusSensorEntity(client, self),
             # --- AC output (diagnostic) ---
             # Whether the DPU X is actually supplying the house: the voltage at
-            # its AC port drops to ~0 and 756 / energy_backup_state flip when
-            # its output stops, which the power sensors alone can't tell from
-            # a quiet load.
+            # its AC port drops to ~0 when its output stops, which the power
+            # sensors alone can't tell from a quiet load.
             _ReportedVoltSensorEntity(client, self, "ac_port_vol", "AC Port Voltage", diagnostic=True),
-            _AcOutputStateEntity(client, self, "ac_output_state", "AC Output State").attr(
+            # Battery calibration (756). The key is from when it was read as
+            # the AC output state; kept so the entity keeps its ID and history.
+            _CalibrationEntity(client, self, "ac_output_state", "Battery Calibration").attr(
                 "ac_output_state", "raw_value", None
             ),
             MiscSensorEntity(client, self, "energy_backup_state", "Energy Backup State"),
@@ -342,7 +343,7 @@ class DeltaProUltraX(DeltaPro3):
             for key, no, wire in (
                 ("ac_port_vol", F_AC_PORT_VOL, WIRE_F32),
                 ("ac_port_amp", F_AC_PORT_AMP, WIRE_F32),
-                ("ac_output_state", F_AC_OUTPUT_STATE, WIRE_VARINT),
+                ("ac_output_state", F_CALIBRATION, WIRE_VARINT),
             ):
                 v = _first(fields, no, wire)
                 if v is not None:

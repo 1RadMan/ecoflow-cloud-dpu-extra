@@ -63,20 +63,20 @@ Each control checks that the gateway reported the change and sends it once more 
 
 ## DELTA Pro Ultra X
 
-The DELTA Pro Ultra X (app connection, device type `DELTA_PRO_ULTRA_X`) gets these diagnostic sensors on top of its existing ones. Together they show the moment its AC output stops, which the power sensors alone can't tell apart from a quiet house:
+The DELTA Pro Ultra X (app connection, device type `DELTA_PRO_ULTRA_X`) gets these diagnostic sensors on top of its existing ones. AC Port Voltage shows the moment its AC output stops, which the power sensors alone can't tell apart from a quiet house:
 
 | Sensor | What it shows |
 |---|---|
 | AC Port Voltage | Voltage at its AC port: about 241 V while it supplies the house, about 0 V while its output is off. Once the gateway has switched the backup side to the grid, it reads the grid voltage (about 245 V) instead. After a restart it's unknown until the DPU X next sends it: when it changes, or with its full report every 2 minutes. |
-| AC Output State | "Discharging" or "Not discharging": whether the DPU X is supplying the house from its batteries. The raw value (2 or 1) is an attribute. Not a sign of the output itself: it reads "Not discharging" during solar surplus too, while the DPU X supplies the house from solar. Use AC Port Voltage for the output. |
-| Energy Backup State | 0 while supplying, 2 while not (the DPU X's own backup flag). |
+| Battery Calibration | "On" while a battery calibration is running, "Off" while none is. It's started from the DPU X's battery menu in the app and has no off switch: it runs until the packs reach 100%. The raw value is an attribute: 0 off, and 1 or 2 while it runs (2 mostly while the batteries discharge, 1 otherwise). Not related to the AC output. Earlier builds called it AC Output State; the entity keeps its ID. |
+| Energy Backup State | The DPU X's own flag, 0 or 2. It changes with Battery Calibration each time one starts or finishes; what it means otherwise isn't known. |
 | AC Port Current | Disabled by default. Follows the load, but reads 15–40% above output power ÷ voltage and about 4 A even while idle on grid, so it isn't a measure of real power. Unknown after a restart until reported, like the voltage. |
 | Battery Pack States | Disabled by default. Each installed pack's state, one digit per pack in bay order, such as `1111122022`: 0 idle, 1 discharging, 2 charging. Attributes `battery_1` to `battery_10` spell out each pack's state. Updates whenever a pack changes. |
 | Telemetry Stalled, Data Stale | See [telemetry stalls](#telemetry-stalls). |
 
-These were decoded from captures of a DPU X on a Smart Gateway through two unexplained drops of its output and a normal fallback to grid at the backup reserve. In all three, AC Output State and Energy Backup State changed within half a second of the voltage, and the error code stayed 0.
+These were decoded from captures of a DPU X on a Smart Gateway through two unexplained drops of its output and a normal fallback to grid at the backup reserve. In all three, the error code stayed 0.
 
-An automation can flag a drop with a trigger on **AC Port Voltage** falling below 50 V, and conditions that the gateway is in Self-Powered mode and the battery is above the backup reserve. Don't rely on AC Output State for this: it reads "Not discharging" during solar surplus too, and when the gateway switched the port off in a test, it changed 18 seconds after the voltage dropped.
+An automation can flag a drop with a trigger on **AC Port Voltage** falling below 50 V, and conditions that the gateway is in Self-Powered mode and the battery is above the backup reserve.
 
 The DPU X also sends two or three messages bundled together about once a minute. The integration used to read only the first, so some updates, including the per-leg output power and the firmware versions, were dropped. All of them are read now.
 
