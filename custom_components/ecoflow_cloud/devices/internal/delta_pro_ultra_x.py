@@ -76,6 +76,19 @@ AC_OUTPUT_STATES: dict[int, str] = {1: "Not discharging", 2: "Discharging"}
 F_PACKS = 786
 PACK_STATES: dict[int, str] = {0: "Idle", 1: "Discharging", 2: "Charging"}
 
+# Per-pack report (cmd 3/28), one message per pack: field 2 is the bay (its
+# charge matched field 786's for that bay in fresh reports), 3 the pack's
+# serial number. Pushed for only some packs at start-up; the rest come with
+# "get all" replies, which aren't merged, and those copies can be stale: the
+# same charge and temperatures in every reply for 25 min, well off field 786,
+# and a different pack in one bay than the module list. That list (cmd 53/113,
+# also only in replies) has each pack's bay (sub-field 7) and base64 serial
+# (3), whose prefix gives the pack type (Y712 first-generation DELTA Pro
+# Ultra battery, Y716 DPU X battery). The rest of 3/28 doesn't follow the DP3
+# BMS heartbeat layout it used to be misread as (with a warning each time),
+# so it's skipped.
+PACK_REPORT_CMD = (3, 28)
+
 
 class _PhaseWattsSensorEntity(InWattsSensorEntity):
     """Reports phase power (W) by multiplying a voltage key with an amperage key."""
@@ -304,6 +317,8 @@ class DeltaProUltraX(DeltaPro3):
         # DP3 decode drops the per-pack array (DisplayPropertyUpload field 786,
         # absent from its proto). Recover it with a second pass over the same
         # payload and inject flat bp_<bay>_soc / bp_<bay>_temp keys.
+        if (header_info.get("cmdFunc"), header_info.get("cmdId")) == PACK_REPORT_CMD:
+            return {}
         result = super()._decode_message_by_type(pdata, header_info)
         if header_info.get("cmdFunc") == 254 and header_info.get("cmdId") == 21:
             try:

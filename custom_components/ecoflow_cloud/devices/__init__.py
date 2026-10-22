@@ -133,7 +133,10 @@ class BaseDevice(ABC):
         """
         watch = self.stream_watch
         assert watch is not None
-        params = data.params.get("params") if data.params else None
+        # Devices that don't merge replies (the DP3 family, e.g. the DPU X)
+        # still have them decoded in raw_data: classify those by it too.
+        decoded = data.params if data.params is not None else data.raw_data
+        params = decoded.get("params") if decoded else None
         if not params:
             watch.on_reply(REPLY_EMPTY)
             return data

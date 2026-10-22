@@ -392,8 +392,13 @@ class DeltaPro3(BaseInternalDevice):
                 flat.update(self._flatten_dict(decoded))
 
             if not had_payload:
-                self._extract_payload_data(headers[0].get("header_obj"))
-                _LOGGER.warning("No payload data found")
+                # Routine: requests (this integration's own "get all") and the
+                # app's keep-alive commands on the set topic carry no payload.
+                _LOGGER.debug(
+                    "No payload in frame (cmdFunc=%s, cmdId=%s)",
+                    headers[0].get("cmdFunc"),
+                    headers[0].get("cmdId"),
+                )
                 return {}
             if not flat:
                 return {}
